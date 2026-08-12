@@ -8,8 +8,8 @@
   임시 로직(mock)입니다. 모델/API가 준비되면 "TODO" 표시 함수만 교체하면 됩니다.
 
 [화면 구성]
-- 사이드바: 오늘 날씨 · 선호(날씨 중요도) 슬라이더 · 사이트 폰트 선택
-- 메인: 오늘 날짜 · 예상 입장객 수/혼잡도/날씨 쾌적도 · 오늘 기준 향후 7일 예측 추이 그래프
+- 사이드바: 선호(날씨 중요도) 슬라이더 · 선택한 날짜의 날씨 · 사이트 폰트 선택
+- 메인: 제목 · 오늘 날짜 · 예상 입장객 수/혼잡도/날씨 쾌적도 · 향후 7일 예측 추이 그래프
 - 공휴일/이상치(예: 어린이날) 안내 문구 출력
 
 실행 방법:
@@ -58,7 +58,7 @@ HOLIDAYS = {
 
 # 어린이날처럼 학습에서 이상치로 다루기로 논의된 날 (하드코딩 안내용)
 OUTLIER_DAYS = {
-    (5, 5): "어린이날은 방문객이 예측치를 크게 벗어나는 이상치라, 별도 안내로 처리합니다.",
+    (5, 5): "어린이날은 방문객이 평소 예측을 크게 웃도는 특별한 날이라, 예측값은 참고용으로만 봐주세요.",
 }
 
 WEEKDAY_KR = ["월", "화", "수", "목", "금", "토", "일"]
@@ -168,14 +168,6 @@ def is_weekend(date: dt.date) -> bool:
     return date.weekday() >= 5
 
 
-def is_vacation(date: dt.date) -> bool:
-    # 대략적인 방학 구간 (여름/겨울), 실제 학사 일정 데이터로 교체 예정
-    m, d = date.month, date.day
-    summer = (m == 7) or (m == 8 and d <= 20)
-    winter = (m == 12 and d >= 24) or (m in (1, 2))
-    return summer or winter
-
-
 def holiday_name(date: dt.date) -> str:
     return HOLIDAYS.get(date, "")
 
@@ -238,15 +230,20 @@ def predict_visitors(date: dt.date, weather: dict) -> int:
     elif r > 0:
         base *= 0.90
 
-    # 방학
-    if is_vacation(date):
-        base *= 1.15
-
     # 날짜별 결정적 노이즈 (재실행해도 값 고정)
     rng = np.random.default_rng(date.toordinal() + 7)
     base *= 1 + rng.normal(0, 0.05)
 
     return int(max(base, 0))
+
+
+def crowd_level(pred: int) -> str:
+    """예상 입장객 수를 혼잡/보통/여유 3단계로 구분."""
+    if pred > 9000:
+        return "혼잡"
+    if pred > 4500:
+        return "보통"
+    return "여유"
 
 
 def weather_score(weather: dict) -> float:
@@ -259,36 +256,86 @@ def weather_score(weather: dict) -> float:
 
 
 # ---------------------------------------------------------------------------
-# 4. 사이드바 (오늘 날씨 정보)
+# 4. 데이터 준비 & 선택 날짜 판별
 # ---------------------------------------------------------------------------
 today = dt.date.today()
-today_weather = get_weather(today)
 
+# 색상 팔레트 (혼잡도 단계별 파스텔 톤)
+LEVEL_COLOR = {"혼잡": "#E7A9A0", "보통": "#E8C79A", "여유": "#A8CBB0"}
+
+# 오늘 기준 7일치 예측 미리 계산
+days = [today + dt.timedelta(days=i) for i in range(7)]
+weathers = [get_weather(d) for d in days]
+preds = [predict_visitors(d, w) for d, w in zip(days, weathers)]
+labels = [f"{d.month}/{d.day}({WEEKDAY_KR[d.weekday()]})" for d in days]
+weekend_flags = [is_weekend(d) or is_holiday(d) for d in days]
+levels = [crowd_level(p) for p in preds]
+df = pd.DataFrame({
+    "날짜": days,
+    "라벨": labels,
+    "예상 입장객": preds,
+    "기온": [w["temp"] for w in weathers],
+    "강수량": [w["rainfall"] for w in weathers],
+    "주말/공휴일": weekend_flags,
+    "혼잡도": levels,
+})
+
+# 막대그래프에서 클릭한 날짜 판별 (기본값: 오늘 = index 0)
+# on_select="rerun" 이므로 이전 클릭 결과는 session_state["trend_chart"]에 남아 있어,
+# 사이드바(아래에서 먼저 렌더)에서도 선택 날짜의 날씨를 표시할 수 있음.
+sel_idx = 0
+try:
+    _points = st.session_state["trend_chart"]["selection"]["points"]
+    if _points:
+        _clicked_label = _points[0].get("x")
+        if _clicked_label in labels:
+            sel_idx = labels.index(_clicked_label)
+except (KeyError, IndexError, TypeError):
+    sel_idx = 0
+
+sel_date = days[sel_idx]
+sel_weather = weathers[sel_idx]
+sel_pred = preds[sel_idx]
+sel_level = crowd_level(sel_pred)
+
+
+# ---------------------------------------------------------------------------
+# 5. 사이드바 (선택한 날짜의 날씨 · 폰트)
+# ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown("## 🎡 줄서기 싫어요")
     st.caption("대전 오월드 방문자 수 예측 · 티익스프레스")
     st.divider()
 
-    st.markdown("### 🌤️ 오늘 날씨")
-    st.metric("평균기온", f"{today_weather['temp']}°C")
-    st.metric("일강수량", f"{today_weather['rainfall']}mm")
-    st.metric("습도", f"{today_weather['humidity']}%")
-    st.caption(
-        f"{WEEKDAY_KR[today.weekday()]}요일 · {today_weather['season']}"
-        + (f" · {holiday_name(today)}" if is_holiday(today) else "")
-    )
-
-    st.divider()
-    st.markdown("### 🎯 선호 설정")
+    # --- 선호 설정 슬라이더 (사이트 제목 바로 아래) ---
+    st.markdown("### 🎯 어떤 날을 찾고 계신가요?")
     weather_weight = st.slider(
         "날씨 중요도",
         min_value=0, max_value=10, value=5,
+        label_visibility="collapsed",
     )
     ends_l, ends_r = st.columns(2)
-    ends_l.caption("← 혼잡도 우선")
+    ends_l.caption("← 한산한 날")
     ends_r.markdown(
-        "<div style='text-align:right; color:gray; font-size:0.8rem;'>날씨 우선 →</div>",
+        "<div style='text-align:right; color:gray; font-size:0.8rem;'>"
+        "좋은 날씨 →</div>",
         unsafe_allow_html=True,
+    )
+    st.caption(
+        "왼쪽에 둘수록 사람이 적어 여유로운 날을, "
+        "오른쪽에 둘수록 날씨가 좋은 날을 먼저 추천해 드려요."
+    )
+
+    st.divider()
+    _sel_label = "오늘" if sel_idx == 0 else sel_date.strftime("%m월 %d일")
+    st.markdown(f"### 🌤️ {_sel_label} 날씨")
+    st.caption("아래 그래프에서 선택한 날짜의 날씨예요.")
+    st.metric("평균기온", f"{sel_weather['temp']}°C")
+    st.metric("일강수량", f"{sel_weather['rainfall']}mm")
+    st.metric("습도", f"{sel_weather['humidity']}%")
+    st.caption(
+        f"{WEEKDAY_KR[sel_date.weekday()]}요일 · {sel_weather['season']}"
+        + (f" · {holiday_name(sel_date)}" if is_holiday(sel_date) else "")
     )
 
     st.divider()
@@ -318,47 +365,21 @@ st.markdown(
 
 
 # ---------------------------------------------------------------------------
-# 5. 메인 화면
+# 6. 메인 화면
 # ---------------------------------------------------------------------------
 st.title("대전 오월드 방문자 수 예측")
-st.caption("오늘 기준 예상 입장객 수와 앞으로 7일간의 예측 추이를 확인하세요.")
+st.caption("오늘부터 일주일간 예상 입장객 수와 혼잡도 흐름을 한눈에 확인해 보세요.")
 
-# 오늘 날짜 표시
-st.markdown(
-    f"## 📅 오늘 날짜: {today.strftime('%Y년 %m월 %d일')} "
-    f"({WEEKDAY_KR[today.weekday()]})"
-)
-
-# 색상 팔레트 (부드러운 파스텔 톤)
-LEVEL_COLOR = {"혼잡": "#E7A9A0", "보통": "#E8C79A", "여유": "#A8CBB0"}
-COLOR_WEEKDAY = "#8FB9D9"   # 차분한 소프트 블루 (평일)
-COLOR_WEEKEND = "#E7A9A0"   # 부드러운 코랄 (주말/공휴일)
-
-# 오늘 기준 7일치 예측 미리 계산
-days = [today + dt.timedelta(days=i) for i in range(7)]
-weathers = [get_weather(d) for d in days]
-preds = [predict_visitors(d, w) for d, w in zip(days, weathers)]
-labels = [f"{d.month}/{d.day}({WEEKDAY_KR[d.weekday()]})" for d in days]
-weekend_flags = [is_weekend(d) or is_holiday(d) for d in days]
-df = pd.DataFrame({
-    "날짜": days,
-    "라벨": labels,
-    "예상 입장객": preds,
-    "기온": [w["temp"] for w in weathers],
-    "강수량": [w["rainfall"] for w in weathers],
-    "주말/공휴일": weekend_flags,
-})
-
-# --- 5-1. 예측 결과 요약 (그래프 클릭 결과를 반영하므로 자리만 먼저 확보) ---
+# --- 6-1. 예측 결과 요약 (그래프 클릭 결과를 반영하므로 자리만 먼저 확보) ---
 summary_area = st.container()
 
 st.divider()
 
-# --- 5-2. 향후 7일 예측 추이 ---
-st.markdown("### 📈 오늘 기준 향후 7일 예측 추이")
-st.caption("막대를 클릭하면 위 요약이 해당 날짜 기준으로 바뀝니다.")
+# --- 6-2. 향후 7일 예측 추이 ---
+st.markdown("### 📈 향후 7일 예측 추이")
+st.caption("궁금한 날짜의 막대를 클릭하면 위쪽 요약이 그 날 기준으로 바뀌어요.")
 
-bar_colors = [COLOR_WEEKEND if flag else COLOR_WEEKDAY for flag in df["주말/공휴일"]]
+bar_colors = [LEVEL_COLOR[lv] for lv in df["혼잡도"]]
 fig = go.Figure()
 fig.add_bar(
     x=df["라벨"],
@@ -368,7 +389,8 @@ fig.add_bar(
     text=[f"{v:,}" for v in df["예상 입장객"]],
     textposition="outside",
     textfont=dict(color="#555555"),
-    hovertemplate="%{x}<br>예상 입장객: %{y:,}명<extra></extra>",
+    customdata=list(df["혼잡도"]),
+    hovertemplate="%{x}<br>예상 입장객: %{y:,}명<br>혼잡도: %{customdata}<extra></extra>",
 )
 fig.update_layout(
     height=380,
@@ -388,37 +410,23 @@ fig.update_xaxes(
     ticktext=[f"<b>{l}</b>" for l in df["라벨"]],
     tickfont=dict(size=16, color="#1F2A37"),
 )
-event = st.plotly_chart(
+st.plotly_chart(
     fig, use_container_width=True, on_select="rerun", key="trend_chart"
 )
 st.markdown(
-    f"<span style='color:{COLOR_WEEKDAY}; font-size:1.1rem;'>●</span> 평일 &nbsp;·&nbsp; "
-    f"<span style='color:{COLOR_WEEKEND}; font-size:1.1rem;'>●</span> 주말/공휴일 (혼잡 예상)",
+    f"<span style='color:{LEVEL_COLOR['혼잡']}; font-size:1.1rem;'>●</span> 혼잡 &nbsp;·&nbsp; "
+    f"<span style='color:{LEVEL_COLOR['보통']}; font-size:1.1rem;'>●</span> 보통 &nbsp;·&nbsp; "
+    f"<span style='color:{LEVEL_COLOR['여유']}; font-size:1.1rem;'>●</span> 여유",
     unsafe_allow_html=True,
 )
-
-# 클릭된 막대 판별 (기본값: 오늘 = index 0)
-sel_idx = 0
-try:
-    points = event["selection"]["points"]
-    if points:
-        clicked_label = points[0].get("x")
-        if clicked_label in labels:
-            sel_idx = labels.index(clicked_label)
-except (TypeError, KeyError, IndexError):
-    sel_idx = 0
-
-sel_date = days[sel_idx]
-sel_weather = weathers[sel_idx]
-sel_pred = preds[sel_idx]
-sel_level = "혼잡" if sel_pred > 9000 else ("보통" if sel_pred > 4500 else "여유")
+# 선택 날짜(sel_idx 등)는 상단 데이터 준비 단계에서 session_state로 이미 계산됨
 
 # 확보해 둔 상단 요약 자리를 선택 날짜 기준으로 채움
 with summary_area:
-    if sel_idx == 0:
-        st.markdown(f"#### 📊 오늘 · {sel_date.strftime('%m월 %d일')} ({WEEKDAY_KR[sel_date.weekday()]}) 예측")
-    else:
-        st.markdown(f"#### 📊 {sel_date.strftime('%m월 %d일')} ({WEEKDAY_KR[sel_date.weekday()]}) 예측")
+    _weekday_label = WEEKDAY_KR[sel_date.weekday()] + (", 오늘" if sel_idx == 0 else "")
+    st.markdown(
+        f"#### 📊 {sel_date.strftime('%Y년 %m월 %d일')} ({_weekday_label}) 예측"
+    )
 
     if (sel_date.month, sel_date.day) in OUTLIER_DAYS:
         st.warning("⚠️ " + OUTLIER_DAYS[(sel_date.month, sel_date.day)])
@@ -439,13 +447,13 @@ with summary_area:
 
     if is_holiday(sel_date):
         st.info(
-            f"📌 이 날은 '{holiday_name(sel_date)}' 공휴일이라, "
-            "예측보다 사람이 더 몰릴 수 있습니다."
+            f"📌 이날은 '{holiday_name(sel_date)}' 공휴일이라 "
+            "예상보다 더 많은 분들이 찾을 수 있어요."
         )
 
 # --- 푸터 ---
 st.divider()
 st.caption(
-    "프로토타입 · 예측/날씨 값은 임시(mock) 로직입니다. "
-    "실제 머신러닝 모델과 기상청 웹서치 API 연결 후 교체 예정입니다. | 티익스프레스"
+    "프로토타입 화면입니다. 지금 보이는 예측·날씨 값은 임시 데이터이며, "
+    "실제 머신러닝 모델과 기상청 API를 연결하면 실제 값으로 바뀝니다. | 티익스프레스"
 )
