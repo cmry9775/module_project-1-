@@ -34,9 +34,9 @@
     이용객수 적음: 공휴일 아닌 월화수목 -> '휴일'도 아니고 '다음날휴일'도 아님
     => 휴일(dayoff), 다음날휴일(nextdayoff) 두 변수로 이용
 
-2. 요일 + 공휴일 => mon~sun, holiday
-3. 휴일 => dayoff 컬럼만
-4. 주말 + 공휴일 -> weekend, holiday
+2. 요일 + 공휴일 (요일 위주)=> mon~sun, holiday
+3. 휴일 (휴일 통합)=> dayoff 컬럼만
+4. 주말 + 공휴일 (휴일 분리) -> weekend, holiday
 
 + month 피쳐 상의: 일단 넣음
 
