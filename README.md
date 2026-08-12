@@ -41,7 +41,7 @@
 * 표본 수가 적어 통계적 유의성을 확보하기에는 다소 한계
 
 
-### 주요 파일
+## 3. 주요 파일
 - Oworld.csv - 최종피처 파일
 - Owrold_hold.csv - 보류 피처 파일
 - Owrold_final_processed - Oworld.csv를 바탕으로 데이터 처리 및 정규화(Normalization)를 거쳐 새로 생성된 가공 파일
