@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import json
 import os
 from datetime import date, datetime, timedelta
 from functools import lru_cache
+from typing import Any, Callable
 from zoneinfo import ZoneInfo
 
 import holidays
@@ -10,34 +13,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+PIPELINE_VERSION = "5.0-11-features"
 WEATHER_URL = "https://weather.com/ko-KR/kr/city/daejeon/tenday"
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 SEOUL = ZoneInfo("Asia/Seoul")
 
-FEATURES = [
-    "holiday", "weekend",
-    "mon", "tue", "wed", "thur", "fri", "sat", "sun",
-    "temperature", "rain", "humidity",
+
+# 학습된 컬럼과 매치
+MODEL_FEATURES = [
+    "holiday",
+    "mon",
+    "tue",
+    "wed",
+    "thur",
+    "fri",
+    "sat",
+    "sun",
+    "temperature",
+    "rain",
+    "humidity",
 ]
 WEEKDAYS = ["mon", "tue", "wed", "thur", "fri", "sat", "sun"]
-
-
-def get_client():
-    from openai import OpenAI
-
-    key = os.getenv("OPENAI_API_KEY")
-    if not key:
-        raise RuntimeError(".env에 OPENAI_API_KEY를 설정하세요.")
-    return OpenAI(api_key=key)
-
-
-def get_dates(days=10):
-    if days < 1 or days > 10:
-        raise ValueError("days는 1~10이어야 합니다.")
-
-    today = datetime.now(SEOUL).date()
-    return [(today + timedelta(days=i)).isoformat() for i in range(days)]
-
 
 WEATHER_RESPONSE_SCHEMA = {
     "type": "object",
@@ -76,51 +72,70 @@ WEATHER_RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
-#Weather.com 검색 후, 별도 요청에서 결과를 JSON으로 정리
-@lru_cache(maxsize=1)
-def search_weather(days=10):
+
+def get_client():
+    from openai import OpenAI
+
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError(".env에 OPENAI_API_KEY를 설정하세요.")
+
+    return OpenAI(
+        api_key=api_key,
+        timeout=90.0,
+        max_retries=1,
+    )
+
+
+def get_dates(days: int = 10) -> list[str]:
+    if not 1 <= days <= 10:
+        raise ValueError("days는 1~10이어야 합니다.")
+
+    today = datetime.now(SEOUL).date()
+    return [(today + timedelta(days=i)).isoformat() for i in range(days)]
+
+
+# Web Search
+@lru_cache(maxsize=10)
+def search_weather(days: int = 10) -> list[dict[str, Any]]:
     dates = get_dates(days)
     client = get_client()
 
-    # 1차 요청: Web Search만 실행합니다.
-    # Web Search와 JSON mode를 같은 요청에서 사용하면 400 오류가 발생합니다.
     search_prompt = f"""
-반드시 아래 Weather.com 대전광역시 10일 예보 페이지를 우선 확인하세요.
+아래 Weather.com 대전광역시 10일 예보 페이지를 우선 확인하세요.
 {WEATHER_URL}
 
 조회 날짜: {', '.join(dates)}
 
-각 날짜별로 다음 값을 찾아 정리하세요.
-- 최고기온
-- 최저기온
-- 낮 습도
-- 밤 습도
-- 낮 강수확률
-- 밤 강수확률
+각 날짜별로 다음 값을 찾으세요.
+- 최고기온, 최저기온
+- 낮 습도, 밤 습도
+- 낮 강수확률, 밤 강수확률
 - 날씨 요약
 
 규칙:
 - 대전광역시 자료만 사용하세요.
 - 월간 평균값이나 과거 평년값은 사용하지 마세요.
-- 페이지에서 확인할 수 없는 값은 '확인 불가'라고 표시하세요.
-- 요청 날짜가 10일 예보에 없으면 그 사실을 표시하세요.
-- 온도는 섭씨, 습도와 강수확률은 퍼센트 기준으로 정리하세요.
+- 확인할 수 없는 값은 확인 불가라고 표시하세요.
+- 온도는 섭씨, 습도와 강수확률은 퍼센트 기준입니다.
 """
 
     search_response = client.responses.create(
         model=OPENAI_MODEL,
         input=search_prompt,
-        tools=[{
-            "type": "web_search",
-            "filters": {"allowed_domains": ["weather.com"]},
-            "user_location": {
-                "type": "approximate",
-                "country": "KR",
-                "city": "Daejeon",
-                "region": "Daejeon",
-                "timezone": "Asia/Seoul",
-            },
-        }],
+        tools=[
+            {
+                "type": "web_search",
+                "filters": {"allowed_domains": ["weather.com"]},
+                "user_location": {
+                    "type": "approximate",
+                    "country": "KR",
+                    "city": "Daejeon",
+                    "region": "Daejeon",
+                    "timezone": "Asia/Seoul",
+                },
+            }
+        ],
         tool_choice="required",
         store=False,
     )
@@ -129,24 +144,19 @@ def search_weather(days=10):
     if not searched_text:
         raise RuntimeError("Weather.com 검색 결과가 비어 있습니다.")
 
-    # 2차 요청: Web Search 없이 검색 결과를 JSON Schema에 맞춰 변환
     parse_prompt = f"""
-아래는 Weather.com 대전 10일 예보를 웹 검색한 결과입니다.
-요청 날짜 목록에 맞춰 기상 데이터를 구조화하세요.
+아래 웹 검색 결과를 요청 날짜별 날씨 JSON으로 구조화하세요.
 
-요청 날짜:
-{', '.join(dates)}
+요청 날짜: {', '.join(dates)}
 
 검색 결과:
 {searched_text}
 
-변환 규칙:
+규칙:
 - 요청 날짜마다 객체를 정확히 하나씩 만드세요.
 - 실제 예보를 확인했으면 forecast_found=true로 작성하세요.
-- 날짜가 없거나 예보를 확인하지 못했으면 forecast_found=false로 작성하고,
-  확인하지 못한 숫자와 문장은 null로 작성하세요.
-- 기온, 습도, 강수확률에서 단위를 제거하고 숫자만 작성하세요.
-- 검색 결과에 없는 값을 추측하지 마세요.
+- 찾지 못한 값은 null로 작성하고 추측하지 마세요.
+- 숫자에는 단위를 넣지 마세요.
 """
 
     parse_response = client.responses.create(
@@ -164,75 +174,69 @@ def search_weather(days=10):
     )
 
     try:
-        result = json.loads(parse_response.output_text)
+        parsed = json.loads(parse_response.output_text)
     except (TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError(
-            "날씨 검색 결과를 JSON으로 변환하지 못했습니다.\n"
-            + str(parse_response.output_text)
-        ) from exc
+        raise RuntimeError("날씨 검색 결과를 JSON으로 변환하지 못했습니다.") from exc
 
-    requested_dates = set(dates)
     by_date = {
         item["target_date"]: item
-        for item in result.get("days", [])
-        if item.get("target_date") in requested_dates
+        for item in parsed.get("days", [])
+        if item.get("target_date") in dates
+    }
+
+    empty = {
+        "forecast_found": False,
+        "max_temp": None,
+        "min_temp": None,
+        "day_humidity": None,
+        "night_humidity": None,
+        "day_rain_probability": None,
+        "night_rain_probability": None,
+        "weather_summary": None,
     }
 
     return [
-        by_date.get(
-            day,
-            {
-                "target_date": day,
-                "forecast_found": False,
-                "max_temp": None,
-                "min_temp": None,
-                "day_humidity": None,
-                "night_humidity": None,
-                "day_rain_probability": None,
-                "night_rain_probability": None,
-                "weather_summary": None,
-            },
-        )
+        by_date.get(day, {"target_date": day, **empty})
         for day in dates
     ]
 
-#holiday, weekend, mon~sun 값 생성
-def make_date_features(target_date):
-    day = date.fromisoformat(target_date)
-    weekday = day.weekday()
-    kr_holidays = holidays.KR(years=[day.year])
+#공휴일과 요일 One-Hot 생성
+def make_date_features(target_date: str) -> dict[str, int]:
+    target = date.fromisoformat(target_date)
+    weekday_index = target.weekday()
+    kr_holidays = holidays.KR(years=[target.year])
 
-    result = {
-        "holiday": int(day in kr_holidays),
-        "weekend": int(weekday >= 5),
-    }
-
+    result = {"holiday": int(target in kr_holidays)}
     for index, name in enumerate(WEEKDAYS):
-        result[name] = int(index == weekday)
+        result[name] = int(index == weekday_index)
 
     return result
 
-# 검색값을 temperature, rain, humidity로 변환
-def normalize_weather(raw):
-    needed = [
-        "max_temp", "min_temp",
-        "day_humidity", "night_humidity",
+#UI 표시용 주말 여부
+def is_weekend(target_date: str) -> bool:
+    return date.fromisoformat(target_date).weekday() >= 5
+
+#검색 날씨를 temperature, rain, humidity로 변환
+def normalize_weather(raw: dict[str, Any]) -> dict[str, Any] | None:
+    required = [
+        "max_temp",
+        "min_temp",
+        "day_humidity",
+        "night_humidity",
         "day_rain_probability",
     ]
 
     if not raw.get("forecast_found"):
         return None
-    if any(raw.get(name) is None for name in needed):
+    if any(raw.get(name) is None for name in required):
         return None
 
-    temperature = (
-        float(raw["max_temp"]) + float(raw["min_temp"])
-    ) / 2
+    temperature = (float(raw["max_temp"]) + float(raw["min_temp"])) / 2
     humidity = (
         float(raw["day_humidity"]) + float(raw["night_humidity"])
     ) / 2
 
-    # 오월드 운영 시간대를 고려하여 낮 강수확률을 사용
+    # 오월드 이용 시간대를 기준으로 낮 강수확률을 사용합니다.
     rain = float(raw["day_rain_probability"])
 
     if not -40 <= temperature <= 50:
@@ -247,24 +251,28 @@ def normalize_weather(raw):
         "weather_summary": raw.get("weather_summary"),
     }
 
-#ML Input
-def make_model_input(target_date, weather):
+#모델 input Feature DataFrame 제작
+def make_model_input(target_date: str, weather: dict[str, Any]) -> pd.DataFrame:
     row = make_date_features(target_date)
-    row["temperature"] = weather["temperature"]
-    row["rain"] = weather["rain"]
-    row["humidity"] = weather["humidity"]
+    row.update(
+        {
+            "temperature": weather["temperature"],
+            "rain": weather["rain"],
+            "humidity": weather["humidity"],
+        }
+    )
+    return pd.DataFrame([row], columns=MODEL_FEATURES)
 
-    return pd.DataFrame([row], columns=FEATURES)
-
-#ML에서 받아오는 4가지 데이터
-def call_ml(model_input, predictor=None):
+#ML 연결 함수에서 방문객·혼잡도·두 점수를 받아오기
+def call_ml(
+    model_input: pd.DataFrame,
+    predictor: Callable[[pd.DataFrame], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     if predictor is None:
         try:
             from ml_service import predict_all
         except ImportError as exc:
-            raise RuntimeError(
-                "ml_service.py에 ML 팀의 predict_all()을 연결하세요."
-            ) from exc
+            raise RuntimeError("ml_service.py를 같은 폴더에 두세요.") from exc
         predictor = predict_all
 
     result = predictor(model_input.copy())
@@ -277,24 +285,26 @@ def call_ml(model_input, predictor=None):
 
     if not isinstance(result, dict):
         raise TypeError("ML 결과는 dict여야 합니다.")
-    if any(key not in result for key in required):
-        raise KeyError(f"ML 결과에는 {required}가 필요합니다.")
+    missing = [key for key in required if key not in result]
+    if missing:
+        raise KeyError(f"ML 결과에서 누락된 값: {missing}")
 
     congestion = int(result["congestion"])
-    if congestion not in [0, 1, 2]:
-        raise ValueError("congestion은 0, 1, 2여야 합니다.")
+    if congestion not in (0, 1, 2):
+        raise ValueError("congestion은 0, 1, 2 중 하나여야 합니다.")
 
     return {
-        "predicted_visitors": max(
-            0, round(float(result["predicted_visitors"]))
-        ),
+        "predicted_visitors": max(0, round(float(result["predicted_visitors"]))),
         "congestion": congestion,
         "user_score": round(float(result["user_score"])),
         "weather_score": round(float(result["weather_score"])),
     }
 
-# ui OutPut
-def make_day_output(raw, predictor=None):
+#날짜 한 개의 UI용 결과
+def make_day_output(
+    raw: dict[str, Any],
+    predictor: Callable[[pd.DataFrame], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     target_date = raw["target_date"]
     weather = normalize_weather(raw)
 
@@ -319,16 +329,14 @@ def make_day_output(raw, predictor=None):
         }
 
     row = model_input.iloc[0]
-
     return {
         "date": target_date,
         "status": "success",
         "data": {
             "holiday": bool(row["holiday"]),
-            "weekend": bool(row["weekend"]),
-            "weekday": {
-                name: bool(row[name]) for name in WEEKDAYS
-            },
+            # 주말은 UI 표시용으로만 유지합니다.
+            "weekend": is_weekend(target_date),
+            "weekday": {name: bool(row[name]) for name in WEEKDAYS},
             "temperature": weather["temperature"],
             "rain": weather["rain"],
             "humidity": weather["humidity"],
@@ -343,8 +351,11 @@ def make_day_output(raw, predictor=None):
         },
     }
 
-#10일치 데이터 생성
-def build_ui_payload(days=10, predictor=None):
+#UI용 오늘 포함 최대 10일치 데이터
+def build_ui_payload(
+    days: int = 10,
+    predictor: Callable[[pd.DataFrame], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     results = [
         make_day_output(raw, predictor)
         for raw in search_weather(days)
@@ -353,12 +364,13 @@ def build_ui_payload(days=10, predictor=None):
     return {
         "generated_at": datetime.now(SEOUL).isoformat(timespec="seconds"),
         "weather_source": WEATHER_URL,
-        "feature_columns": FEATURES,
+        "feature_columns": MODEL_FEATURES,
         "days": results,
     }
 
-#선택된 날짜의 데이터 출력
-def get_selected_day(payload, selected_date):
+
+def get_selected_day(payload: dict[str, Any], selected_date: str):
+    """UI에서 선택한 날짜의 이미 계산된 결과를 반환합니다."""
     return next(
         (item for item in payload["days"] if item["date"] == selected_date),
         None,
