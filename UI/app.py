@@ -303,11 +303,7 @@ sel_level = crowd_level(sel_pred)
 # 5. 사이드바 (선택한 날짜의 날씨 · 폰트)
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.markdown("## 🎡 줄서기 싫어요")
-    st.caption("대전 오월드 방문자 수 예측 · 티익스프레스")
-    st.divider()
-
-    # --- 선호 설정 슬라이더 (사이트 제목 바로 아래) ---
+    # --- 선호 설정 슬라이더 ---
     st.markdown("### 🎯 어떤 날을 찾고 계신가요?")
     weather_weight = st.slider(
         "날씨 중요도",
@@ -346,6 +342,10 @@ with st.sidebar:
         index=0,
         label_visibility="collapsed",
     )
+
+    st.divider()
+    st.markdown("## 🎡 줄서기 싫어요")
+    st.caption("대전 오월드 방문자 수 예측 · 티익스프레스")
 
 # 선택한 폰트를 사이트 전체에 적용
 _font_family = FONT_OPTIONS[selected_font]
@@ -391,6 +391,8 @@ fig.add_bar(
     textfont=dict(color="#555555"),
     customdata=list(df["혼잡도"]),
     hovertemplate="%{x}<br>예상 입장객: %{y:,}명<br>혼잡도: %{customdata}<extra></extra>",
+    selected=dict(marker=dict(opacity=1.0)),
+    unselected=dict(marker=dict(opacity=0.65)),
 )
 fig.update_layout(
     height=380,
