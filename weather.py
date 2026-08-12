@@ -57,7 +57,7 @@ def get_forecast_weather(target_date):
                 "pop": data["hourly"]["precipitation_probability"][idx]
             }
         else:
-            return {"weather": "데이터 없음", "icon": "❓", "temp": "-", "humidity": "-", "pop": "-"}
+            return {"weather": "데이터 없음", "icon": "❓", "temperature": "-", "humidity": "-", "rain": "-"}
 
     except Exception as e:
         print(f"오류: {e}")
