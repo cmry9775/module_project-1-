@@ -170,9 +170,9 @@ def _mock_visitors(date: dt.date, w: dict) -> int:
 
 def _mock_crowd_level(pred: int) -> str:
     """ML팀 Classification 모델 자리를 대신하는 임시 구간 분류."""
-    if pred > 9000:
+    if pred >= 5000:
         return "혼잡"
-    if pred > 4500:
+    if pred >= 2000:
         return "보통"
     return "여유"
 
