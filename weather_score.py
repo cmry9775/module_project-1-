@@ -1,5 +1,5 @@
 def weather_score(avg_temp_c, rain_chance_pct, humidity_pct):
-    #optimal temp, rain_chance, humidity : ISO 7730
+    #optimal temp, rain_chance, humidity : ASHRAE/WHO comfort range
     ideal_low, ideal_high = 18, 24
     if ideal_low <= avg_temp_c <= ideal_high:
         temp_score = 100
