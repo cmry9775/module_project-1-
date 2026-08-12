@@ -5,6 +5,7 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
+import re
 
 # 1. API 키 숨김 처리 및 OpenAI 객체 초기화
 # .env 파일에서 환경 변수 불러오기
@@ -29,24 +30,65 @@ def get_oworld_notices(target_url):
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # faqTbl' 클래스를 가진 테이블의 내용물(tr)만 확
+        # 'faqTbl' 클래스를 가진 테이블의 내용물(tr)만 확인
         notice_list = soup.select("table.faqTbl tbody tr")
-        
-        titles = []
+
+        results = []
+
         for row in notice_list[:10]: # 최신 글 10개 추출
             title_tag = row.select_one("td.title a")
             
             if title_tag:
-                # 텍스트 앞뒤의 띄어쓰기(엔터 등)를 제거하고 저장
                 clean_title = title_tag.get_text(strip=True)
-                titles.append(clean_title)
+
+                # 게시판 본문 내용 파싱
+                href = title_tag['href']
+                match = re.search(r"fn_move_article\('(\d+)'\)", href)  # article id 가져오기
+
+                content_text = ""
+                image_urls = []
+
+                if match:
+                    article_id = match.group(1)
+
+                    detail_url = f"https://www.oworld.kr/newkfsweb/kfi/kfs/linkage/selectDccoLinkage.do?bbsIdx={article_id}&mn=KFS_34_01_09_01&bbscd=9&menucd=916"
+                    detail_response = requests.get(detail_url, headers=headers)
+                    detail_response.raise_for_status()
+                    detail_soup = BeautifulSoup(detail_response.text, 'html.parser')
+
+                    td_list = detail_soup.find_all("td")
+                    content_area = None
+                    if td_list:
+                        content_area = max(td_list, key=lambda td: len(td.get_text(strip=True)) + (len(td.find_all("img")) * 500))
                     
-        return titles
+                    if content_area:
+                        content_text = content_area.get_text(separator="\n", strip=True)
+                        img_tags = content_area.select('img')
+
+                    else:
+                        img_tags = detail_soup.select('img')
+
+                    for img in img_tags:
+                        img_src = img.get('src')
+                        if img_src:
+                            if img_src.startswith('/'):
+                                img_src = f"https://www.oworld.kr{img_src}"
+
+                            if "icon" not in img_src and "logo" not in img_src and "btn" not in img_src:
+                                image_urls.append(img_src)
+
+                    results.append({
+                        "title": clean_title,
+                        "text": content_text,   # 본문
+                        "images": image_urls    # 이미지
+                    })
+                    
+        return results
     except Exception as e:
         print(f"크롤링 오류 발생: {e}")
         return []
 
-def get_urgent_notice_json(target_url):
+def get_urgent_notice_json(target_url, notices):
     """
     크롤링한 공지사항을 OpenAI로 분석하여 JSON 형태로 반환합니다.
     (Streamlit 팀에서 이 함수의 리턴값을 받아서 사용)
@@ -86,7 +128,7 @@ def get_urgent_notice_json(target_url):
             response_format={ "type": "json_object" },
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"최신 공지사항 목록:\n{titles_text}"}
+                {"role": "user", "content": f"최신 공지사항 목록:\n{notices}"}
             ],
         )
         
@@ -103,13 +145,19 @@ def get_urgent_notice_json(target_url):
             "notices": titles
         }, ensure_ascii=False)
 
-
-# ==========================================
 # 테스트용 메인 실행부
-# ==========================================
 if __name__ == "__main__":
     MY_URL = "https://www.oworld.kr/newkfsweb/kfi/kfs/linkage/selectDccoLinkageList.do?mn=KFS_34_01_09_01&bbscd=9&menucd=916" 
-    
-    json_result = get_urgent_notice_json(MY_URL)
+
+    notices = get_oworld_notices(MY_URL)
+    ''' 디버깅
+    for i, notice in enumerate(notices, 1):
+        print(f"[{i}] {notice['title']}")
+        print(f" - 본문: {notice['text']}")
+        print(f" - 이미지 수: {len(notice['images'])}장")
+        print(f" - 이미지 URL: {notice['images']}")
+        print("-" * 40)
+    '''
+    json_result = get_urgent_notice_json(MY_URL, notices)
     print("\n--- AI 방문자 영향 요인 분석 결과 (JSON) ---")
     print(json_result)
