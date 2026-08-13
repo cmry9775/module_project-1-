@@ -113,6 +113,12 @@ _VISITOR_CAP = 14000
 _RAIN_OVERRIDES = {
     (8, 12): 0,
     (8, 14): 100,
+    (8, 17): 0,
+}
+
+# 특정 날짜 평균기온 고정 (월, 일) → °C  — 데모용 더미 오버라이드
+_TEMP_OVERRIDES = {
+    (8, 17): 23.1,
 }
 
 
@@ -123,6 +129,8 @@ def _mock_weather(date: dt.date) -> dict:
     season = "봄" if m in (3, 4, 5) else "여름" if m in (6, 7, 8) else "가을" if m in (9, 10, 11) else "겨울"
     base_temp = {"봄": 17, "여름": 28, "가을": 16, "겨울": 2}[season]
     temp = round(base_temp + rng.normal(0, 3), 1)
+    if (date.month, date.day) in _TEMP_OVERRIDES:
+        temp = float(_TEMP_OVERRIDES[(date.month, date.day)])
     base_rain = {"봄": 25, "여름": 45, "가을": 20, "겨울": 20}[season]
     rain_prob = float(np.clip(base_rain + rng.normal(0, 20), 0, 100))
     rain_prob = round(rain_prob / 10) * 10  # 기상청 표기처럼 10% 단위

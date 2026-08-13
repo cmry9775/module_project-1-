@@ -53,6 +53,12 @@ SLIDER_DEFAULT = 5  # 선호도 기본값 (날씨 50% / 혼잡도 50%)
 # 사용자 화면에는 노출하지 않는다. 팀 내부 검증이 필요할 때만 True 로 바꿔 쓴다.
 SHOW_SCORES = False
 
+# True: 추천은 사이드바, 메인에는 예측 추이와 선택일 기상 (현재 기본).
+# False: 예전 기본 레이아웃 — 메인에 추천 카드, 사이드바에 선택일 날씨.
+# 예전 레이아웃은 화면에서 쓰지 않지만, 비교·복원용으로 코드는 남겨 둔다.
+# 다시 보려면 아래 값을 False 로 바꾸면 된다.
+ALT_LAYOUT = True
+
 
 # ---------------------------------------------------------------------------
 # 1. 데이터 수신 (캐시 필수)
@@ -157,17 +163,98 @@ def sel_stat(label: str, value_html: str) -> None:
     )
 
 
+def hex_rgba(hex_color: str, alpha: float) -> str:
+    """막대 선택 강조용 rgba 문자열."""
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def selection_bar_index(selection, labels: list) -> int | None:
+    """Plotly on_select 결과에서 클릭된 막대 인덱스를 읽는다. 선택이 없으면 None."""
+    try:
+        points = selection["points"]
+        if not points:
+            return None
+        p = points[0]
+        for key in ("point_index", "point_number"):
+            if p.get(key) is not None:
+                idx = int(p[key])
+                if 0 <= idx < len(labels):
+                    return idx
+        x = p.get("x")
+        if x in labels:
+            return labels.index(x)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return None
+
+
+def recommend_metrics_html(row) -> str:
+    """추천 카드용 혼잡도·기온·강수확률·습도. 레이블로 항목을 구분한다."""
+    crowd_c = LEVEL_COLOR.get(row["crowd_level"], LEVEL_COLOR_FALLBACK)
+    items = [
+        (
+            "혼잡도",
+            f"<span style='color:{crowd_c};'>●</span> {row['crowd_level']}",
+        ),
+        (
+            "기온",
+            f"<span style='color:{temp_color(row['temp'])};'>{row['temp']}°C</span>",
+        ),
+        (
+            "강수확률",
+            f"<span style='color:{rain_color(row['rain_prob'])};'>{row['rain_prob']:.0f}%</span>",
+        ),
+        (
+            "습도",
+            f"<span style='color:{humidity_color(row['humidity'])};'>{row['humidity']}%</span>",
+        ),
+    ]
+    chips = "".join(
+        f"""<span style="display:inline-flex; align-items:baseline; gap:5px; white-space:nowrap;">
+                <span style="font-size:0.75rem; color:gray;">{label}</span>
+                <span>{value}</span>
+            </span>"""
+        for label, value in items
+    )
+    return (
+        f'<div style="display:flex; flex-wrap:wrap; align-items:baseline; '
+        f'gap:6px 14px; margin-top:8px; font-size:0.95rem; color:#444;">{chips}</div>'
+    )
+
+
 # ---------------------------------------------------------------------------
-# 3. 사이드바 (1) - 선호도 · 대안 UI 토글
+# 3. 사이드바 (1) - 선호도
 # ---------------------------------------------------------------------------
-# 토글이 화면 설정보다 아래에 있어도, 같은 키로 이전 실행 값을 먼저 읽는다.
-alt_layout = bool(st.session_state.get("alt_layout", False))
+alt_layout = ALT_LAYOUT
+st.session_state.setdefault("chart_token", 0)
+st.session_state.setdefault("pending_recommend", False)
+st.session_state.setdefault("chart_sel_label", None)
+
+
+def on_weather_pref_change() -> None:
+    """슬라이더가 움직이면 예측 추이 선택을 추천일로 바꾼다."""
+    st.session_state.pending_recommend = True
+    chart_key = f"trend_chart_{st.session_state.chart_token}"
+    try:
+        points = st.session_state[chart_key]["selection"]["points"]
+        if not points:
+            st.session_state.ignored_point_index = None
+            return
+        idx = points[0].get("point_index", points[0].get("point_number"))
+        st.session_state.ignored_point_index = int(idx) if idx is not None else None
+    except (KeyError, IndexError, TypeError, ValueError):
+        st.session_state.ignored_point_index = None
+
 
 with st.sidebar:
     st.markdown("### 🎯 어떤 날을 찾고 계신가요?")
     weather_pref = st.slider(
         "날씨 중요도",
         min_value=0, max_value=10, value=SLIDER_DEFAULT,
+        key="weather_pref",
+        on_change=on_weather_pref_change,
         label_visibility="collapsed",
     )
     ends_l, ends_r = st.columns(2)
@@ -190,21 +277,30 @@ best = df.loc[best_idx]
 
 
 # ---------------------------------------------------------------------------
-# 4. 그래프에서 선택한 날짜 판별 (기본값 = 추천 날짜)
+# 4. 그래프에서 선택한 날짜 판별
+#    첫 진입 = 오늘, 슬라이더 변경 후 = 추천일, 막대 클릭 = 그 날짜
 # ---------------------------------------------------------------------------
-if "chart_token" not in st.session_state:
-    st.session_state.chart_token = 0
 chart_key = f"trend_chart_{st.session_state.chart_token}"
+labels = list(df["label"])
+today_idx = next((i for i, d in enumerate(df["date"]) if d == today), 0)
 
-sel_idx = best_idx
+if st.session_state.pending_recommend:
+    st.session_state.chart_sel_label = labels[best_idx]
+    st.session_state.pending_recommend = False
+
+click_idx = None
 try:
-    points = st.session_state[chart_key]["selection"]["points"]
-    if points:
-        clicked = points[0].get("x")
-        if clicked in list(df["label"]):
-            sel_idx = list(df["label"]).index(clicked)
-except (KeyError, IndexError, TypeError):
-    pass
+    click_idx = selection_bar_index(st.session_state[chart_key]["selection"], labels)
+except (KeyError, TypeError):
+    click_idx = None
+
+if click_idx is not None and click_idx != st.session_state.get("ignored_point_index"):
+    st.session_state.chart_sel_label = labels[click_idx]
+    st.session_state.ignored_point_index = None
+
+if st.session_state.chart_sel_label not in labels:
+    st.session_state.chart_sel_label = labels[today_idx]
+sel_idx = labels.index(st.session_state.chart_sel_label)
 
 sel = df.loc[sel_idx]
 sel_date = sel["date"]
@@ -223,10 +319,7 @@ def render_recommend(*, compact: bool) -> None:
                 <div style="font-size:1.45rem; font-weight:700; line-height:1.3;">
                     {best['date'].strftime('%m월 %d일')} ({best['weekday']})
                 </div>
-                <div style="font-size:0.9rem; color:#444; margin-top:6px;">
-                    <span style="color:{LEVEL_COLOR.get(best['crowd_level'], LEVEL_COLOR_FALLBACK)};">●</span>
-                    {best['crowd_level']} &nbsp;·&nbsp; {best['temp']}°C
-                </div>
+                {recommend_metrics_html(best)}
                 <div style="margin-top:10px; padding-top:10px; border-top:1px solid rgba(0,0,0,0.06);">
                     <div style="font-size:0.8rem; color:gray;">예상 입장객 수</div>
                     <div style="font-size:1.45rem; font-weight:700;">
@@ -271,16 +364,12 @@ def render_recommend(*, compact: bool) -> None:
             <div style="border:1px solid rgba(0,0,0,0.08); border-left:6px solid {BEST_COLOR};
                         border-radius:12px; padding:18px 40px 18px 22px;
                         display:flex; justify-content:space-between; align-items:center; gap:16px;">
-                <div>
+                <div style="min-width:0; flex:1;">
                     <div style="font-size:0.85rem; color:gray;">최종 추천 날짜</div>
                     <div style="font-size:2rem; font-weight:700; line-height:1.3;">
                         {best['date'].strftime('%m월 %d일')} ({best['weekday']})
                     </div>
-                    <div style="font-size:0.95rem; color:#444; margin-top:6px;">
-                        <span style="color:{LEVEL_COLOR.get(best['crowd_level'], LEVEL_COLOR_FALLBACK)};">●</span>
-                        {best['crowd_level']} &nbsp;·&nbsp; {best['temp']}°C &nbsp;·&nbsp;
-                        강수확률 {best['rain_prob']:.0f}%
-                    </div>
+                    {recommend_metrics_html(best)}
                 </div>
                 <div style="text-align:right; flex-shrink:0;">
                     <div style="font-size:0.85rem; color:gray;">예상 입장객 수</div>
@@ -373,7 +462,10 @@ def render_trend(*, show_weather: bool) -> None:
     bar_text = [f"{v:,}" for v in df["pred_visitors"]]
     hover = "%{x}<br>예상 입장객: %{y:,}명<br>혼잡도: %{customdata}<extra></extra>"
 
-    bar_colors = [LEVEL_COLOR.get(lv, LEVEL_COLOR_FALLBACK) for lv in df["crowd_level"]]
+    bar_colors = [
+        hex_rgba(LEVEL_COLOR.get(lv, LEVEL_COLOR_FALLBACK), 1.0 if i == sel_idx else 0.55)
+        for i, lv in enumerate(df["crowd_level"])
+    ]
     line_colors = [BEST_COLOR if i == best_idx else "rgba(0,0,0,0)" for i in range(len(df))]
     line_widths = [3 if i == best_idx else 0 for i in range(len(df))]
 
@@ -389,8 +481,6 @@ def render_trend(*, show_weather: bool) -> None:
         textfont=dict(color="#555555"),
         customdata=list(df["crowd_level"]),
         hovertemplate=hover,
-        selected=dict(marker=dict(opacity=1.0)),
-        unselected=dict(marker=dict(opacity=0.65)),
     )
     fig.update_layout(
         height=400,
@@ -409,7 +499,14 @@ def render_trend(*, show_weather: bool) -> None:
         ticktext=[f"<b>{l}</b>" for l in df["label"]],
         tickfont=dict(size=13, color="#1F2A37"),
     )
-    st.plotly_chart(fig, width="stretch", on_select="rerun", key=chart_key)
+    st.plotly_chart(
+        fig,
+        width="stretch",
+        on_select="rerun",
+        selection_mode="points",
+        key=chart_key,
+        config={"displayModeBar": False},
+    )
 
     st.markdown(
         " &nbsp;·&nbsp; ".join(
@@ -443,6 +540,7 @@ with st.sidebar:
     if alt_layout:
         render_recommend(compact=True)
     else:
+        # 미사용(예전 기본 UI). ALT_LAYOUT=False 일 때만 사이드바에 선택일 날씨를 보여 준다.
         _label = "오늘" if sel_date == today else sel_date.strftime("%m월 %d일")
         st.markdown(f"### 🌤️ {_label} 날씨")
         st.caption("그래프에서 선택한 날짜의 날씨예요.")
@@ -453,13 +551,11 @@ with st.sidebar:
     st.divider()
     with st.expander("🔤 화면 설정"):
         selected_font = st.selectbox("사이트 폰트", options=list(FONT_OPTIONS.keys()), index=0)
-        st.toggle(
-            "다른 UI 확인",
-            key="alt_layout",
-            help="켜면 추천이 사이드바로 가고, 메인에는 예측 추이와 선택일 기상 수치가 맨 위에 옵니다.",
-        )
         if st.button("날짜 선택 초기화", width="stretch"):
             st.session_state.chart_token += 1
+            st.session_state.pending_recommend = False
+            st.session_state.chart_sel_label = None
+            st.session_state.ignored_point_index = None
             st.rerun()
 
     st.markdown("## 🎡 줄서기 싫어요")
@@ -487,6 +583,10 @@ st.markdown(
         font-feature-settings: "liga" !important;
         -webkit-font-feature-settings: "liga" !important;
     }}
+    /* 호버 툴팁이 막대 클릭을 가로채지 않게 한다 */
+    .stPlotlyChart .hoverlayer, .js-plotly-plot .hoverlayer {{
+        pointer-events: none !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -502,6 +602,7 @@ st.caption(f"오늘부터 {N_DAYS}일간의 예상 입장객과 혼잡도를 보
 if alt_layout:
     render_trend(show_weather=True)
 else:
+    # 미사용(예전 기본 UI). ALT_LAYOUT=False 일 때만 메인에 추천 카드가 먼저 온다.
     render_recommend(compact=False)
     st.divider()
     render_trend(show_weather=False)
