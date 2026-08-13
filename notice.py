@@ -68,8 +68,7 @@ def get_oworld_notices(target_url):
         print(f"크롤링 오류 발생: {e}")
         return []
 
-# 3. AI 분석 함수
-# 3. AI 분석 함수 (🎯 URL 직접 주입 방식 적용)
+# 3. AI 분석 함수 (URL 직접 주입 방식 적용)
 def get_urgent_notice_json(notices):
     if not notices:
         return json.dumps({
@@ -80,7 +79,7 @@ def get_urgent_notice_json(notices):
     
     today_str = datetime.now().strftime("%Y-%m-%d")
     
-    # 🎯 1. AI에게 텍스트를 줄 때 [제목, 본문, 진짜 URL]을 한 세트로 묶어서 줍니다!
+    # AI에게 텍스트를 줄 때 [제목, 본문, 진짜 URL]을 한 세트로 묶어서 전달
     formatted_text = "[최신 공지사항 7개 데이터]\n"
     for i, item in enumerate(notices, 1):
         clean_text = clean_and_truncate_text(item.get("text", ""))
@@ -105,7 +104,7 @@ def get_urgent_notice_json(notices):
 
         [출력 JSON 포맷 예시]
         {{
-        "status": "success",
+        "   tatus": "success",
         "major_summary": "8월 15일부터 여름축제와 야간개장이 시작되어 다가오는 주말 방문객이 집중될 것으로 예상되며, 펀하우스 등 일부 시설은 당분간 운휴합니다.",
         "notices_list": [
             {{
