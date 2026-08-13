@@ -6,10 +6,6 @@
 - 혼잡도 분류 모델용 17개 Feature를 별도로 생성
 - ml_service.py에 두 입력을 전달
 - Streamlit UI가 사용할 날짜별 결과를 반환
-
-중요
-- 날씨 조회 구현은 weather.py에 분리되어 있습니다.
-- Streamlit 화면 코드는 이 파일에 포함하지 않습니다.
 """
 
 from __future__ import annotations
