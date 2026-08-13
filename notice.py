@@ -6,6 +6,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 from openai import OpenAI
 import re
+from datetime import datetime, timedelta
 
 # 1. API 키 숨김 처리 및 OpenAI 객체 초기화
 # .env 파일에서 환경 변수 불러오기
@@ -17,147 +18,134 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 # 연결된 OpenAI 객체 생성
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+# 토큰 사용량 줄이기
+def clean_and_truncate_text(text, max_len=250):
+    if not text: return ""
+    cleaned = re.sub(r'\s+', ' ', text).strip()
+    return cleaned[:max_len]
 
-# 2. 핵심 함수 정의
+# 2. 크롤링 함수
 def get_oworld_notices(target_url):
-    """오월드 홈페이지에서 최신 공지사항 제목 10개를 크롤링합니다."""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         response = requests.get(target_url, headers=headers, timeout=5)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # 'faqTbl' 클래스를 가진 테이블의 내용물(tr)만 확인
         notice_list = soup.select("table.faqTbl tbody tr")
-
         results = []
 
-        for row in notice_list[:10]: # 최신 글 10개 추출
+        for row in notice_list[:10]:
             title_tag = row.select_one("td.title a")
-            
             if title_tag:
                 clean_title = title_tag.get_text(strip=True)
-
-                # 게시판 본문 내용 파싱
                 href = title_tag['href']
-                match = re.search(r"fn_move_article\('(\d+)'\)", href)  # article id 가져오기
-
+                match = re.search(r"fn_move_article\('(\d+)'\)", href)
+                
                 content_text = ""
                 image_urls = []
 
                 if match:
                     article_id = match.group(1)
-
                     detail_url = f"https://www.oworld.kr/newkfsweb/kfi/kfs/linkage/selectDccoLinkage.do?bbsIdx={article_id}&mn=KFS_34_01_09_01&bbscd=9&menucd=916"
                     detail_response = requests.get(detail_url, headers=headers)
-                    detail_response.raise_for_status()
                     detail_soup = BeautifulSoup(detail_response.text, 'html.parser')
 
                     td_list = detail_soup.find_all("td")
-                    content_area = None
                     if td_list:
                         content_area = max(td_list, key=lambda td: len(td.get_text(strip=True)) + (len(td.find_all("img")) * 500))
-                    
-                    if content_area:
-                        content_text = content_area.get_text(separator="\n", strip=True)
+                        content_text = content_area.get_text(separator=" ", strip=True)
                         img_tags = content_area.select('img')
-
                     else:
                         img_tags = detail_soup.select('img')
 
                     for img in img_tags:
                         img_src = img.get('src')
-                        if img_src:
-                            if img_src.startswith('/'):
-                                img_src = f"https://www.oworld.kr{img_src}"
-
-                            if "icon" not in img_src and "logo" not in img_src and "btn" not in img_src:
-                                image_urls.append(img_src)
+                        if img_src and img_src.startswith('/'):
+                            img_src = f"https://www.oworld.kr{img_src}"
+                        if img_src and "icon" not in img_src and "logo" not in img_src and "btn" not in img_src:
+                            image_urls.append(img_src)
 
                     results.append({
                         "title": clean_title,
-                        "text": content_text,   # 본문
-                        "images": image_urls    # 이미지
+                        "text": content_text,
+                        "images": image_urls
                     })
-                    
         return results
     except Exception as e:
         print(f"크롤링 오류 발생: {e}")
         return []
 
-def get_urgent_notice_json(target_url, notices):
-    """
-    크롤링한 공지사항을 OpenAI로 분석하여 JSON 형태로 반환합니다.
-    (Streamlit 팀에서 이 함수의 리턴값을 받아서 사용)
-    """
-    # 1. 크롤링으로 최신 제목들 가져오기
-    titles = get_oworld_notices(target_url)
+# 3. AI 분석 함수
+def get_urgent_notice_json(notices):
+    if not notices:
+        return json.dumps({"status": "error", "summary": "데이터 없음", "notices": []}, ensure_ascii=False)
     
-    # 크롤링 실패 시 기본 JSON 반환
-    if not titles:
-        return json.dumps({
-            "status": "error",
-            "summary": "공지사항 데이터를 불러오지 못했습니다.",
-            "notices": []
-        }, ensure_ascii=False)
-    
-    # 2. 리스트를 하나의 문자열로 묶기
-    titles_text = "\n".join([f"- {t}" for t in titles])
-    
-    # 3. 프롬프트에서 JSON 구조와 핵심 키워드 지시
+    # AI에게 보낼 텍스트 정리 (이전과 동일)
+    formatted_notices = ""
+    for i, item in enumerate(notices, 1):
+        clean_text = clean_and_truncate_text(item.get("text", ""))
+        img_url = item['images'][0] if item.get('images') else "없음"
+        
+        formatted_notices += f"[{i}] 제목: {item['title']}\n"
+        formatted_notices += f" - 본문: {clean_text}\n"
+        formatted_notices += f" - 이미지 URL: {img_url}\n\n"
+
+    # System Prompt: 역할과 대원칙만 부여
     system_prompt = (
-    "너는 대전 오월드 방문자 수 예측 시스템의 데이터 분석가야. "
-    "제공된 공지사항 목록 중 '입장객 수(방문자 수) 증가 또는 감소에 직접적인 영향을 미칠 만한 요소'만 선별해. "
-    "(예: 특정 놀이기구/시설 운휴, 야간개장, 불꽃쇼, 특별 할인 프로모션, 물놀이장 미운영 등) "
-
-    "조건:"
-    "1. 자잘한 행사나 영향이 적은 소식은 무시하고, 방문객 수 변동에 중요한 요인만 종합해."
-    "2. 반드시 한 문장(한 줄)으로 요약해."
-    "3. 방문객 영향 요소가 전혀 없다면 '현재 방문자 수에 영향을 줄 만한 특이 운휴 및 이벤트가 없습니다.'라고 답해."
-
-    "응답 형식(JSON): {\"status\": \"urgent\" 또는 \"info\" 또는 \"normal\", \"summary\": \"한 줄 요약 내용\"}"
+        "너는 대전 오월드 방문자 수 예측 시스템의 데이터 분석가야. "
+        "절대로 외부 웹 검색(Web Search)을 수행하지 마. "
+        "오직 내가 아래에 넘겨준 공지사항 텍스트와 이미지 URL만 참고해서 판단해."
     )
     
+    # User Prompt
+    user_prompt = f"""최신 공지사항 목록:
+        {formatted_notices}
+
+        [중요 지시사항]
+        제공된 공지사항 목록 중 '입장객 수 증가/감소'에 영향을 미칠 중요 이벤트(운휴, 행사, 할인 등)만 추출해.
+        아래 조건과 JSON 형식에 '정확하게' 맞춰서 출력해. 앞뒤에 쓸데없는 설명은 절대 붙이지 마.
+
+        1. 이벤트 기간(예: 8/12~8/14)이 주어지면, 해당 기간에 속하는 **모든 개별 날짜(YYYY-MM-DD 형식)**를 Key로 만들어서 동일한 이벤트 내용을 반복해서 넣어줘. 연도가 생략되었다면 2026년으로 간주해.
+        2. 이벤트 내용은 매우 간략하게 적어 (예: '기차여행 운휴', '여름축제 및 불꽃쇼').
+        3. 해당 날짜들을 종합하여 오늘/이번 주 방문객 수에 미칠 영향을 summary(한 줄 요약)로 작성해.
+
+        [출력 JSON 포맷 예시]
+        {{
+        "status": "urgent",
+        "events_by_date": {{
+            "2026-07-30": "펀하우스 운휴",
+            "2026-08-12": "기차여행 운휴",
+            "2026-08-13": "기차여행 운휴",
+            "2026-08-14": "기차여행 운휴",
+            "2026-08-15": "여름축제 시작"
+        }},
+        "summary": "펀하우스 및 기차여행 운휴가 있으나, 8월 15일 여름축제로 방문객 증가가 예상됩니다."
+        }}
+        """
+    
     try:
-        # 미리 만들어둔 client 객체를 사용해 통신
         response = client.chat.completions.create(
-            model="gpt-5.5",
+            model="gpt-5.6-luna", 
             response_format={ "type": "json_object" },
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"최신 공지사항 목록:\n{notices}"}
-            ],
+                {"role": "user", "content": user_prompt}
+            ]
         )
         
-        # AI가 만들어준 JSON 문자열을 딕셔너리로 변환
+        print(f"\n📊 [토큰 사용량] 입력: {response.usage.prompt_tokens} | 출력: {response.usage.completion_tokens} | 총합: {response.usage.total_tokens}")
+
         ai_result = json.loads(response.choices[0].message.content)
-        
-        # 최종 JSON 문자열로 예쁘게 변환하여 반환
         return json.dumps(ai_result, ensure_ascii=False, indent=2)
         
     except Exception as e:
-        return json.dumps({
-            "status": "error",
-            "summary": f"AI 분석 중 오류 발생: {str(e)}",
-            "notices": titles
-        }, ensure_ascii=False)
-
-# 테스트용 메인 실행부
+        return json.dumps({"status": "error", "summary": f"오류 발생: {str(e)}"}, ensure_ascii=False)
+    
+# 실행부분
 if __name__ == "__main__":
     MY_URL = "https://www.oworld.kr/newkfsweb/kfi/kfs/linkage/selectDccoLinkageList.do?mn=KFS_34_01_09_01&bbscd=9&menucd=916" 
-
     notices = get_oworld_notices(MY_URL)
-    ''' 디버깅
-    for i, notice in enumerate(notices, 1):
-        print(f"[{i}] {notice['title']}")
-        print(f" - 본문: {notice['text']}")
-        print(f" - 이미지 수: {len(notice['images'])}장")
-        print(f" - 이미지 URL: {notice['images']}")
-        print("-" * 40)
-    '''
-    json_result = get_urgent_notice_json(MY_URL, notices)
+    json_result = get_urgent_notice_json(notices)
     print("\n--- AI 방문자 영향 요인 분석 결과 (JSON) ---")
     print(json_result)
