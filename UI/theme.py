@@ -6,12 +6,16 @@ LEVEL_COLOR = {
     "여유": "#A8CBB0",
     "보통": "#E8C79A",
     "혼잡": "#E7A9A0",
-    "매우혼잡": "#D98B80",
 }
 LEVEL_COLOR_FALLBACK = "#BFC7D1"
 
 # 추천 1순위 막대 강조색
 BEST_COLOR = "#7BA7D4"
+
+# 그래프 x축 날짜 레이블 색. 달력처럼 토요일은 파랑, 일요일·공휴일은 빨강.
+DATE_LABEL_COLOR = "#1F2A37"
+SATURDAY_LABEL_COLOR = "#2F6FD0"
+HOLIDAY_LABEL_COLOR = "#D8453F"
 
 # 기상 수치 범위별 색 (사이드바 등). 쾌적 → 주의로 갈수록 따뜻/강한 톤.
 def temp_color(temp: float) -> str:
@@ -34,6 +38,15 @@ def rain_color(rain_prob: float) -> str:
     if rain_prob <= 60:
         return "#E0A060"   # 비 가능성
     return "#5B8DB8"       # 비 확률 높음
+
+
+def score_color(score: float) -> str:
+    """추천 점수 0~100 구간색. 낮음(적) → 보통(황) → 높음(녹)."""
+    if score >= 70:
+        return "#6BAF8D"
+    if score >= 40:
+        return "#E0A060"
+    return "#D98B80"
 
 
 def humidity_color(humidity: float) -> str:

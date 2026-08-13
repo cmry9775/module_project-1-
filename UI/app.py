@@ -19,8 +19,18 @@
    팀원 환경이 더 낮으면 width="stretch" → use_container_width=True 로 바꾸면 됩니다.
 """
 
-import datetime as dt
+import hashlib
+import pathlib
 
+import folium
+from streamlit_folium import st_folium
+
+# 뉴스 블록 보류 (사이드바 '대전 오월드 최신 뉴스' 참고)
+# import os
+# from openai import OpenAI
+# api_key = os.getenv("OPENAI_API_KEY")
+
+import datetime as dt
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -28,12 +38,16 @@ import streamlit as st
 import data_provider as dp
 from theme import (
     BEST_COLOR,
+    DATE_LABEL_COLOR,
     FONT_FACE_CSS,
     FONT_OPTIONS,
+    HOLIDAY_LABEL_COLOR,
     LEVEL_COLOR,
     LEVEL_COLOR_FALLBACK,
+    SATURDAY_LABEL_COLOR,
     humidity_color,
     rain_color,
+    score_color,
     temp_color,
 )
 
@@ -44,6 +58,9 @@ st.set_page_config(
     page_title="줄서기 싫어요 | 대전 오월드 방문자 예측",
     page_icon="🎡",
     layout="wide",
+    # 추천 카드와 후보 목록이 접히지 않도록 사이드바를 넓게 연다.
+    # 정수는 초기 폭(px)이고 허용 범위는 200~600 이다.
+    initial_sidebar_state=600,
 )
 
 N_DAYS = 10  # 당일 포함 예측 일수 (기상 웹서치로 확보 가능한 일수에 맞춰 조정)
@@ -63,26 +80,75 @@ ALT_LAYOUT = True
 # ---------------------------------------------------------------------------
 # 1. 데이터 수신 (캐시 필수)
 # ---------------------------------------------------------------------------
+# st.cache_data 는 load_forecast 본문만 해시하므로 data_provider.py 를 고쳐도
+# 캐시가 그대로 남는다. 수신 스키마가 바뀌면 예전 결과에 없는 컬럼을 읽다가
+# KeyError 로 죽으므로, 파일 지문을 캐시 키에 넣어 자동으로 무효화한다.
+PROVIDER_FINGERPRINT = hashlib.md5(
+    pathlib.Path(dp.__file__).read_bytes(), usedforsecurity=False
+).hexdigest()
+
+
 @st.cache_data(ttl=60 * 60, show_spinner="예측 데이터를 불러오는 중이에요...")
-def load_forecast(start_date: dt.date, n_days: int) -> pd.DataFrame:
+def load_forecast(start_date: dt.date, n_days: int, fingerprint: str) -> pd.DataFrame:
     """
     슬라이더를 움직일 때마다 스크립트 전체가 재실행되므로 반드시 캐시를 건다.
     캐시가 없으면 선호도 조작 1회당 기상 웹서치가 n_days 번 다시 호출된다.
+
+    fingerprint 는 캐시 키 용도로만 받는다. 함수 안에서는 쓰지 않는다.
     """
-    return pd.DataFrame(dp.fetch_forecast(start_date, n_days))
+    rows = dp.fetch_forecast(start_date, n_days)
+    # 수신 건수가 0이거나 일부 키가 빠져도 컬럼 구성은 항상 같게 만든다.
+    return pd.DataFrame(rows, columns=dp.ROW_COLUMNS)
 
 
 today = dt.date.today()
-df = load_forecast(today, N_DAYS)
-df["label"] = df.apply(lambda r: f"{r['date'].month}/{r['date'].day}({r['weekday']})", axis=1)
+df = load_forecast(today, N_DAYS, PROVIDER_FINGERPRINT)
+
+if df.empty or not df["ok"].any():
+    st.title("대전 오월드 방문자 수 예측")
+    st.error("예측 데이터를 받지 못했어요. 잠시 후 다시 시도해 주세요.")
+    st.stop()
+
+df["label"] = df.apply(
+    lambda r: f"{r['date'].month}/{r['date'].day}({r['weekday']})", axis=1
+)
 
 
 # ---------------------------------------------------------------------------
 # 2. UI 담당 계산 - 최종 추천 점수 / 최종 추천 날짜
 # ---------------------------------------------------------------------------
-def calc_final_scores(frame: pd.DataFrame, w_weather: float, w_visitor: float) -> pd.Series:
+def calc_final_scores(
+    frame: pd.DataFrame, w_weather: float, w_visitor: float
+) -> pd.Series:
     """선호도 가중치로 두 Score 를 합산한 0~100 점수."""
-    return (frame["weather_score"] * w_weather + frame["visitor_score"] * w_visitor).round(1)
+    return (
+        frame["weather_score"] * w_weather + frame["visitor_score"] * w_visitor
+    ).round(1)
+
+
+def day_tag(row) -> str:
+    """요일 뒤에 붙일 휴일/주말 표시. 평일이면 빈 문자열."""
+    if row["is_holiday"]:
+        return row["holiday_name"] or "공휴일"
+    if row["is_weekend"]:
+        return "주말"
+    return "휴일" if row["is_dayoff"] else ""
+
+
+def date_label_color(row) -> str:
+    """달력 표기를 따라 토요일은 파랑, 일요일과 공휴일은 빨강."""
+    if row["is_holiday"] or row["date"].weekday() == 6:
+        return HOLIDAY_LABEL_COLOR
+    if row["date"].weekday() == 5:
+        return SATURDAY_LABEL_COLOR
+    return DATE_LABEL_COLOR
+
+
+def date_title(row) -> str:
+    """카드 제목용 '08월 15일 (토 · 광복절)' 형식."""
+    tag = day_tag(row)
+    suffix = f" · {tag}" if tag else ""
+    return f"{row['date'].strftime('%m월 %d일')} ({row['weekday']}{suffix})"
 
 
 def recommend_reason(row, w_weather: float) -> str:
@@ -91,19 +157,19 @@ def recommend_reason(row, w_weather: float) -> str:
         "여유": "사람이 적어 여유롭고",
         "보통": "지나치게 붐비지 않고",
         "혼잡": "사람은 조금 많지만",
-        "매우혼잡": "사람은 많은 편이지만",
     }.get(row["crowd_level"], "이 기간 중에서는")
 
+    summary = row["weather_summary"]
     if row["rain_prob"] >= 60:
-        weather = "비 소식이 있어요"
+        weather = f"{summary or '비'} 예보라 우산이 필요해요"
     elif row["temp"] >= 30:
         weather = "조금 더운 편이에요"
     elif row["temp"] <= 5:
         weather = "많이 추운 편이에요"
     elif row["rain_prob"] <= 30 and 15 <= row["temp"] <= 27:
-        weather = "나들이하기 좋은 날씨예요"
+        weather = f"{summary or '맑은 날씨'} 예보라 나들이하기 좋아요"
     else:
-        weather = "무난한 날씨예요"
+        weather = f"{summary or '무난한 날씨'} 예보예요"
 
     if w_weather >= 0.7:
         pref = "좋은 날씨를 우선해서 찾았어요."
@@ -111,6 +177,9 @@ def recommend_reason(row, w_weather: float) -> str:
         pref = "한산한 날을 우선해서 찾았어요."
     else:
         pref = "날씨와 혼잡도를 함께 보고 골랐어요."
+
+    if row["is_next_dayoff"]:
+        pref += " 다음 날도 쉬는 날이라 평소보다 붐빌 수 있어요."
 
     return f"{crowd} {weather}. {pref}"
 
@@ -190,13 +259,23 @@ def selection_bar_index(selection, labels: list) -> int | None:
     return None
 
 
-def recommend_metrics_html(row) -> str:
-    """추천 카드용 혼잡도·기온·강수확률·습도. 레이블로 항목을 구분한다."""
-    crowd_c = LEVEL_COLOR.get(row["crowd_level"], LEVEL_COLOR_FALLBACK)
-    items = [
+def chip_row(items) -> str:
+    """(레이블, 값) 목록을 한 줄 칩으로 그린다."""
+    return "".join(
+        f"""<span style="display:inline-flex; align-items:baseline; gap:5px; white-space:nowrap;">
+                <span style="font-size:0.75rem; color:gray;">{label}</span>
+                <span>{value}</span>
+            </span>"""
+        for label, value in items
+    )
+
+
+def weather_chip_items(row) -> list[tuple[str, str]]:
+    """날씨·기온·강수확률·습도. 추천 카드와 예측 추이가 같은 형식을 쓴다."""
+    return [
         (
-            "혼잡도",
-            f"<span style='color:{crowd_c};'>●</span> {row['crowd_level']}",
+            "날씨",
+            f"{row['weather_icon']} {row['weather_summary']}".strip() or "-",
         ),
         (
             "기온",
@@ -211,16 +290,52 @@ def recommend_metrics_html(row) -> str:
             f"<span style='color:{humidity_color(row['humidity'])};'>{row['humidity']}%</span>",
         ),
     ]
-    chips = "".join(
-        f"""<span style="display:inline-flex; align-items:baseline; gap:5px; white-space:nowrap;">
-                <span style="font-size:0.75rem; color:gray;">{label}</span>
-                <span>{value}</span>
-            </span>"""
-        for label, value in items
-    )
+
+
+def crowd_chip_value(row) -> str:
+    crowd_c = LEVEL_COLOR.get(row["crowd_level"], LEVEL_COLOR_FALLBACK)
+    return f"<span style='color:{crowd_c};'>●</span> {row['crowd_level']}"
+
+
+def recommend_metric_chips(row) -> str:
+    """추천 카드용. 날씨 칩 사이에 혼잡도를 끼워 넣는다."""
+    items = weather_chip_items(row)
+    items.insert(1, ("혼잡도", crowd_chip_value(row)))
+    return chip_row(items)
+
+
+def recommend_metrics_html(row) -> str:
+    """추천 카드용 날씨·혼잡도 줄. 레이블로 항목을 구분한다."""
     return (
         f'<div style="display:flex; flex-wrap:wrap; align-items:baseline; '
-        f'gap:6px 14px; margin-top:8px; font-size:0.95rem; color:#444;">{chips}</div>'
+        f'gap:6px 14px; margin-top:8px; font-size:0.95rem; color:#444;">'
+        f"{recommend_metric_chips(row)}</div>"
+    )
+
+
+def rank_candidate_html(rank: int, row) -> str:
+    """다음 후보 한 줄. 사이드바가 좁아 이모지로 항목을 구분한다.
+
+    순위 · 날짜 · 날씨 · 기온 · 혼잡도 · 예상 입장객
+    """
+    values = [
+        f"<span style='font-weight:700;'>"
+        f"{rank}위 {row['date'].strftime('%m/%d')}({row['weekday']})</span>",
+        f"{row['weather_icon']} {row['weather_summary']}".strip() or "-",
+        f"🌡️ <span style='color:{temp_color(row['temp'])};'>{row['temp']}°C</span>",
+        crowd_chip_value(row),
+        f"예상 입장객 {row['pred_visitors']:,}명",
+    ]
+    if SHOW_SCORES:
+        values.append(
+            f"<span style='color:gray;'>{row['final_score']:.1f}</span>"
+        )
+    cells = "<span style='color:#C9CED6; margin:0 6px;'>·</span>".join(
+        f"<span style='white-space:nowrap;'>{v}</span>" for v in values
+    )
+    return (
+        f'<div style="margin:6px 0; font-size:0.95rem; color:#444; '
+        f'line-height:1.7;">{cells}</div>'
     )
 
 
@@ -252,7 +367,9 @@ with st.sidebar:
     st.markdown("### 🎯 어떤 날을 찾고 계신가요?")
     weather_pref = st.slider(
         "날씨 중요도",
-        min_value=0, max_value=10, value=SLIDER_DEFAULT,
+        min_value=0,
+        max_value=10,
+        value=SLIDER_DEFAULT,
         key="weather_pref",
         on_change=on_weather_pref_change,
         label_visibility="collapsed",
@@ -271,7 +388,11 @@ with st.sidebar:
 
 # 선호도가 정해져야 최종 점수와 추천 날짜가 나온다
 df["final_score"] = calc_final_scores(df, w_weather, w_visitor)
-ranked = df.sort_values(["final_score", "date"], ascending=[False, True]).reset_index()
+# 예보를 못 받은 날(status != success)은 점수가 신뢰할 수 없으므로 추천 후보에서 뺀다.
+# 전부 실패한 경우는 위에서 걸러 냈으므로 여기서는 최소 한 건이 남는다.
+ranked = df[df["ok"]].sort_values(
+    ["final_score", "date"], ascending=[False, True]
+).reset_index()
 best_idx = int(ranked.loc[0, "index"])
 best = df.loc[best_idx]
 
@@ -307,6 +428,37 @@ sel_date = sel["date"]
 sel_level_color = LEVEL_COLOR.get(sel["crowd_level"], LEVEL_COLOR_FALLBACK)
 
 
+# 추가한 내용
+# 원점수
+def render_score_breakdown(row, *, compact: bool) -> None:
+    weather = round(float(row["weather_score"]))
+    visitor = round(float(row["visitor_score"]))
+    total = round(float(row["final_score"]))
+    size = "1.45rem" if compact else "1.8rem"
+
+    container = st.expander("추천 점수 자세히 보기")
+    with container:
+        st.caption(f"현재 반영 비율 => 날씨 {w_weather:.0%} / 한산함 {w_visitor:.0%}")
+        cols = st.columns(3)
+        for col, label, value in zip(
+            cols,
+            ("날씨 점수", "한산함 점수", "종합 추천 점수"),
+            (weather, visitor, total),
+        ):
+            color = score_color(value)
+            with col:
+                st.markdown(
+                    f"""
+                    <div style='font-size:0.8rem; color:gray;'>{label}</div>
+                    <div style='font-size:{size}; font-weight:700; line-height:1.3; color:{color}; margin-bottom:0.4rem;'>
+                        {value}점
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+
+
 def render_recommend(*, compact: bool) -> None:
     """최종 추천 섹션. compact=True 이면 사이드바용 좁은 레이아웃."""
     if compact:
@@ -314,10 +466,10 @@ def render_recommend(*, compact: bool) -> None:
         st.markdown(
             f"""
             <div style="border:1px solid rgba(0,0,0,0.08); border-left:6px solid {BEST_COLOR};
-                        border-radius:12px; padding:14px 16px;">
+                        border-radius:12px; padding:14px 16px; margin-bottom:8px;">
                 <div style="font-size:0.8rem; color:gray;">최종 추천 날짜</div>
                 <div style="font-size:1.45rem; font-weight:700; line-height:1.3;">
-                    {best['date'].strftime('%m월 %d일')} ({best['weekday']})
+                    {date_title(best)}
                 </div>
                 {recommend_metrics_html(best)}
                 <div style="margin-top:10px; padding-top:10px; border-top:1px solid rgba(0,0,0,0.06);">
@@ -330,29 +482,29 @@ def render_recommend(*, compact: bool) -> None:
             """,
             unsafe_allow_html=True,
         )
-        st.caption(recommend_reason(best, w_weather))
+        # 두 문장을 한 캡션으로 묶는다. 블록을 나누면 Streamlit 기본 간격이 끼어든다.
+        lines = [recommend_reason(best, w_weather)]
+        tips = outfit_tips(best)
+        if tips:
+            lines.append("　".join(tips))
+        st.caption("<br>".join(lines), unsafe_allow_html=True)
+        render_outlier_note(best)
+        render_score_breakdown(best, compact=True)
         if SHOW_SCORES:
             st.caption(
                 f"[내부] 날씨 {best['weather_score']} × {w_weather:.0%} + "
                 f"한산함 {best['visitor_score']} × {w_visitor:.0%} = {best['final_score']:.1f}"
             )
-        tips = outfit_tips(best)
-        if tips:
-            st.caption("　".join(tips))
 
         st.markdown(
             "<div style='font-size:0.85rem; color:gray; margin-top:0.6rem;'>다음 후보</div>",
             unsafe_allow_html=True,
         )
+        cards = []
         for i in range(1, min(4, len(ranked))):
             row = df.loc[int(ranked.loc[i, "index"])]
-            st.markdown(
-                f"**{i + 1}위** {row['date'].strftime('%m/%d')}({row['weekday']}) · "
-                f"<span style='color:{LEVEL_COLOR.get(row['crowd_level'], LEVEL_COLOR_FALLBACK)};'>●</span> "
-                f"{row['crowd_level']} · {row['temp']}°C"
-                + (f" · {row['final_score']:.1f}" if SHOW_SCORES else ""),
-                unsafe_allow_html=True,
-            )
+            cards.append(rank_candidate_html(i + 1, row))
+        st.markdown("".join(cards), unsafe_allow_html=True)
         return
 
     st.markdown("### 🏆 이 날 가시는 걸 추천해요")
@@ -362,12 +514,12 @@ def render_recommend(*, compact: bool) -> None:
         st.markdown(
             f"""
             <div style="border:1px solid rgba(0,0,0,0.08); border-left:6px solid {BEST_COLOR};
-                        border-radius:12px; padding:18px 40px 18px 22px;
+                        border-radius:12px; padding:18px 40px 18px 22px; margin-bottom:8px;
                         display:flex; justify-content:space-between; align-items:center; gap:16px;">
                 <div style="min-width:0; flex:1;">
                     <div style="font-size:0.85rem; color:gray;">최종 추천 날짜</div>
                     <div style="font-size:2rem; font-weight:700; line-height:1.3;">
-                        {best['date'].strftime('%m월 %d일')} ({best['weekday']})
+                        {date_title(best)}
                     </div>
                     {recommend_metrics_html(best)}
                 </div>
@@ -382,30 +534,34 @@ def render_recommend(*, compact: bool) -> None:
             unsafe_allow_html=True,
         )
         st.caption(recommend_reason(best, w_weather))
+        tips = outfit_tips(best)
+        if tips:
+            st.markdown("　".join(tips))
+        render_outlier_note(best)
+        render_score_breakdown(best, compact=False)
         if SHOW_SCORES:
             st.caption(
                 f"[내부] 날씨 {best['weather_score']} × {w_weather:.0%} + "
                 f"한산함 {best['visitor_score']} × {w_visitor:.0%} = {best['final_score']:.1f}"
             )
-        tips = outfit_tips(best)
-        if tips:
-            st.markdown("　".join(tips))
 
     with rec_r:
-        st.markdown("<div style='font-size:0.85rem; color:gray;'>다음 후보</div>", unsafe_allow_html=True)
+        st.markdown(
+            "<div style='font-size:0.85rem; color:gray;'>다음 후보</div>",
+            unsafe_allow_html=True,
+        )
+        cards = []
         for i in range(1, min(4, len(ranked))):
             row = df.loc[int(ranked.loc[i, "index"])]
-            c1, c2, c3 = st.columns([1.1, 1, 1])
-            c1.markdown(f"**{i + 1}위** {row['date'].strftime('%m/%d')}({row['weekday']})")
-            c2.markdown(
-                f"<span style='color:{LEVEL_COLOR.get(row['crowd_level'], LEVEL_COLOR_FALLBACK)};'>●</span> "
-                f"{row['crowd_level']}",
-                unsafe_allow_html=True,
-            )
-            c3.markdown(
-                f"{row['temp']}°C · 💧{row['rain_prob']:.0f}%"
-                + (f" · {row['final_score']:.1f}" if SHOW_SCORES else "")
-            )
+            cards.append(rank_candidate_html(i + 1, row))
+        st.markdown("".join(cards), unsafe_allow_html=True)
+
+
+def render_outlier_note(row) -> None:
+    """학습에서 이상치로 다루는 날이면 예측값을 곧이곧대로 믿지 않도록 안내한다."""
+    note = dp.outlier_note(row["date"])
+    if note:
+        st.info(note, icon="🎈")
 
 
 def render_trend(*, show_weather: bool) -> None:
@@ -413,36 +569,52 @@ def render_trend(*, show_weather: bool) -> None:
     st.markdown(f"### 📈 향후 {N_DAYS}일 예측 추이")
     st.caption("궁금한 날짜의 막대를 클릭하면 아래 수치가 그 날 기준으로 바뀌어요.")
 
-    _suffix = ", 오늘" if sel_date == today else (", 추천일" if sel_idx == best_idx else "")
+    _tag = day_tag(sel)
+    _marks = [sel["weekday"]]
+    if _tag:
+        _marks.append(_tag)
+    if sel_date == today:
+        _marks.append("오늘")
+    elif sel_idx == best_idx:
+        _marks.append("추천일")
     st.markdown(
         f"""
         <div style="font-size:1.15rem; font-weight:600; color:#1F2A37; margin:0.35rem 0 0.6rem;">
-            {sel_date.strftime('%m월 %d일')} ({sel['weekday']}{_suffix}) 기준
+            {sel_date.strftime('%m월 %d일')} ({' · '.join(_marks)}) 기준
         </div>
         """,
         unsafe_allow_html=True,
     )
+    render_outlier_note(sel)
 
-    if show_weather:
-        r1c1, r1c2, r1c3, r1c4, r1c5 = st.columns(5)
-        with r1c1:
+    if not sel["ok"]:
+        st.warning("이 날은 예측 데이터를 받지 못했어요. 다른 날짜를 선택해 주세요.")
+    elif show_weather:
+        # 날씨 칸만 글자가 길어 폭을 조금 더 준다.
+        c1, c2, c3, c4, c5, c6 = st.columns([1, 1, 1.3, 1, 1, 1])
+        with c1:
             sel_stat("예상 입장객 수", f"{sel['pred_visitors']:,}명")
-        with r1c2:
+        with c2:
             sel_stat(
                 "혼잡도",
                 f"<span style='color:{sel_level_color};'>●</span> {sel['crowd_level']}",
             )
-        with r1c3:
+        with c3:
+            sel_stat(
+                "날씨",
+                f"{sel['weather_icon']} {sel['weather_summary']}".strip() or "-",
+            )
+        with c4:
             sel_stat(
                 "평균기온",
                 f"<span style='color:{temp_color(sel['temp'])};'>{sel['temp']}°C</span>",
             )
-        with r1c4:
+        with c5:
             sel_stat(
                 "강수확률",
                 f"<span style='color:{rain_color(sel['rain_prob'])};'>{sel['rain_prob']:.0f}%</span>",
             )
-        with r1c5:
+        with c6:
             sel_stat(
                 "평균습도",
                 f"<span style='color:{humidity_color(sel['humidity'])};'>{sel['humidity']}%</span>",
@@ -459,14 +631,24 @@ def render_trend(*, show_weather: bool) -> None:
 
     y_values = df["pred_visitors"]
     y_title = "예상 입장객 수(명)"
-    bar_text = [f"{v:,}" for v in df["pred_visitors"]]
-    hover = "%{x}<br>예상 입장객: %{y:,}명<br>혼잡도: %{customdata}<extra></extra>"
+    bar_text = [
+        f"{v:,}" if ok else "예보 없음" for v, ok in zip(df["pred_visitors"], df["ok"])
+    ]
+    hover = (
+        "%{x}<br>예상 입장객: %{y:,}명<br>혼잡도: %{customdata[0]}"
+        "<br>날씨: %{customdata[1]}<extra></extra>"
+    )
 
     bar_colors = [
-        hex_rgba(LEVEL_COLOR.get(lv, LEVEL_COLOR_FALLBACK), 1.0 if i == sel_idx else 0.55)
-        for i, lv in enumerate(df["crowd_level"])
+        hex_rgba(
+            LEVEL_COLOR.get(lv, LEVEL_COLOR_FALLBACK) if ok else LEVEL_COLOR_FALLBACK,
+            (1.0 if i == sel_idx else 0.55) if ok else 0.25,
+        )
+        for i, (lv, ok) in enumerate(zip(df["crowd_level"], df["ok"]))
     ]
-    line_colors = [BEST_COLOR if i == best_idx else "rgba(0,0,0,0)" for i in range(len(df))]
+    line_colors = [
+        BEST_COLOR if i == best_idx else "rgba(0,0,0,0)" for i in range(len(df))
+    ]
     line_widths = [3 if i == best_idx else 0 for i in range(len(df))]
 
     fig = go.Figure()
@@ -479,7 +661,12 @@ def render_trend(*, show_weather: bool) -> None:
         text=bar_text,
         textposition="outside",
         textfont=dict(color="#555555"),
-        customdata=list(df["crowd_level"]),
+        customdata=[
+            [lv, f"{icon} {summary}".strip() or "-"]
+            for lv, icon, summary in zip(
+                df["crowd_level"], df["weather_icon"], df["weather_summary"]
+            )
+        ],
         hovertemplate=hover,
     )
     fig.update_layout(
@@ -496,8 +683,11 @@ def render_trend(*, show_weather: bool) -> None:
     fig.update_xaxes(
         showgrid=False,
         tickvals=list(df["label"]),
-        ticktext=[f"<b>{l}</b>" for l in df["label"]],
-        tickfont=dict(size=13, color="#1F2A37"),
+        ticktext=[
+            f"<b><span style='color:{date_label_color(r)}'>{r['label']}</span></b>"
+            for _, r in df.iterrows()
+        ],
+        tickfont=dict(size=13, color=DATE_LABEL_COLOR),
     )
     st.plotly_chart(
         fig,
@@ -517,17 +707,42 @@ def render_trend(*, show_weather: bool) -> None:
         unsafe_allow_html=True,
     )
 
+    failed = list(df.loc[~df["ok"], "label"])
+    if failed:
+        st.warning(
+            f"{', '.join(failed)} 은(는) 예보를 받지 못해 추천 후보에서 제외했어요."
+        )
+
     with st.expander(f"📋 {N_DAYS}일치 표로 보기"):
-        cols = ["label", "temp", "rain_prob", "humidity", "pred_visitors", "crowd_level"]
+        source = df.assign(
+            sky=(df["weather_icon"] + " " + df["weather_summary"]).str.strip(),
+        )
+        cols = [
+            "label",
+            "sky",
+            "temp",
+            "rain_prob",
+            "humidity",
+            "pred_visitors",
+            "crowd_level",
+        ]
         names = {
-            "label": "날짜", "temp": "기온(°C)", "rain_prob": "강수확률(%)", "humidity": "습도(%)",
-            "pred_visitors": "예상 입장객", "crowd_level": "혼잡도",
+            "label": "날짜",
+            "sky": "날씨",
+            "temp": "기온(°C)",
+            "rain_prob": "강수확률(%)",
+            "humidity": "습도(%)",
+            "pred_visitors": "예상 입장객",
+            "crowd_level": "혼잡도",
         }
         if SHOW_SCORES:  # 내부 검증용 컬럼
             cols += ["visitor_score", "weather_score", "final_score"]
-            names |= {"visitor_score": "이용자 Score", "weather_score": "날씨 Score",
-                      "final_score": "최종 점수"}
-        table = df[cols].rename(columns=names)
+            names |= {
+                "visitor_score": "이용자 Score",
+                "weather_score": "날씨 Score",
+                "final_score": "최종 점수",
+            }
+        table = source[cols].rename(columns=names)
         st.dataframe(table, hide_index=True, width="stretch")
 
 
@@ -542,15 +757,62 @@ with st.sidebar:
     else:
         # 미사용(예전 기본 UI). ALT_LAYOUT=False 일 때만 사이드바에 선택일 날씨를 보여 준다.
         _label = "오늘" if sel_date == today else sel_date.strftime("%m월 %d일")
-        st.markdown(f"### 🌤️ {_label} 날씨")
-        st.caption("그래프에서 선택한 날짜의 날씨예요.")
+        st.markdown(f"### {sel['weather_icon'] or '🌤️'} {_label} 날씨")
+        st.caption(f"그래프에서 선택한 날짜의 날씨예요. {sel['weather_summary']}")
         weather_metric("평균기온", f"{sel['temp']}°C", temp_color(sel["temp"]))
-        weather_metric("강수확률", f"{sel['rain_prob']:.0f}%", rain_color(sel["rain_prob"]))
-        weather_metric("평균습도", f"{sel['humidity']}%", humidity_color(sel["humidity"]))
+        weather_metric(
+            "강수확률", f"{sel['rain_prob']:.0f}%", rain_color(sel["rain_prob"])
+        )
+        weather_metric(
+            "평균습도", f"{sel['humidity']}%", humidity_color(sel["humidity"])
+        )
+
+    # 뉴스 블록 보류: OpenAI 호출부(response 생성)가 아직 없어 키가 있으면 NameError 가 난다.
+    # 웹서치 응답 코드를 채운 뒤 아래를 되살리면 된다.
+    # st.divider()
+    # st.markdown("### 📰 대전 오월드 최신 뉴스")
+    #
+    # if not api_key:
+    #     st.info("최신 뉴스를 보려면 키 등록 필요")
+    # else:
+    #     if "oworld_news" not in st.session_state:
+    #         with st.spinner("대전 오월드 관련 뉴스를 검색하고 있습니다."):
+    #             st.session_state.oworld_news = response.output_text
+    #
+    #     st.markdown(st.session_state.oworld_news)
 
     st.divider()
+    with st.expander("📍 대전오월드 위치"):
+        st.markdown("### 📍 대전오월드 위치")
+        st.info('주소: 대전 중구 사정공원로 70')
+
+        latitude = 36.2886167
+        longitude = 127.3969124
+
+        oworld_map = folium.Map(
+            location=[latitude, longitude],
+            zoom_start=15,
+        )
+
+        folium.Marker(
+            location=[latitude, longitude],
+            popup="대전 오월드",
+            tooltip="대전 오월드",
+            icon=folium.Icon(color="red", icon="star"),
+        ).add_to(oworld_map)
+
+        st_folium(
+            oworld_map,
+            width=700,
+            height=350,
+            key="oworld_map",
+        )
+
+        st.divider()
     with st.expander("🔤 화면 설정"):
-        selected_font = st.selectbox("사이트 폰트", options=list(FONT_OPTIONS.keys()), index=0)
+        selected_font = st.selectbox(
+            "사이트 폰트", options=list(FONT_OPTIONS.keys()), index=0
+        )
         if st.button("날짜 선택 초기화", width="stretch"):
             st.session_state.chart_token += 1
             st.session_state.pending_recommend = False
@@ -587,6 +849,13 @@ st.markdown(
     .stPlotlyChart .hoverlayer, .js-plotly-plot .hoverlayer {{
         pointer-events: none !important;
     }}
+    /* 메인 상단 기본 여백(6rem)이 과해서 제목이 너무 내려온다 */
+    .stMainBlockContainer, [data-testid="stMainBlockContainer"] {{
+        padding-top: 2.5rem !important;
+    }}
+    .stMainBlockContainer h1, [data-testid="stMainBlockContainer"] h1 {{
+        padding-top: 0 !important;
+    }}
     </style>
     """,
     unsafe_allow_html=True,
@@ -597,7 +866,9 @@ st.markdown(
 # 6. 메인
 # ---------------------------------------------------------------------------
 st.title("대전 오월드 방문자 수 예측")
-st.caption(f"오늘부터 {N_DAYS}일간의 예상 입장객과 혼잡도를 보고, 취향에 맞는 방문일을 찾아보세요.")
+st.caption(
+    f"오늘부터 {N_DAYS}일간의 예상 입장객과 혼잡도를 보고, 취향에 맞는 방문일을 찾아보세요."
+)
 
 if alt_layout:
     render_trend(show_weather=True)
@@ -610,6 +881,9 @@ else:
 # --- 푸터 ---
 st.divider()
 st.caption(
-    "프로토타입 화면입니다. 예측·혼잡도 값은 아직 임시 데이터이며, "
-    "data_provider.py 의 USE_MOCK 을 끄면 실제 모델·API 값으로 바뀝니다. | 티익스프레스"
+    ("프로토타입 화면입니다. 예측·혼잡도 값은 아직 임시 데이터이며, "
+     "data_provider.py 의 USE_MOCK 을 끄면 실제 모델·API 값으로 바뀝니다."
+     if dp.USE_MOCK
+     else "예측·혼잡도 값은 모델 결과를 그대로 표시합니다.")
+    + " | 티익스프레스"
 )
