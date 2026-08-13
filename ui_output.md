@@ -5,7 +5,11 @@
 )
 
 payload = build_ui_payload(days=10)
-  
+
+selected_day = get_selected_day(
+    payload,
+    "2026-08-15"
+)
   
   # 테스트용 3일 출력 결과
   "days": [
