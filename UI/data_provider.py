@@ -111,6 +111,111 @@ OUTLIER_DAYS = {
             "예측값은 참고용으로만 봐주세요.",
 }
 
+# 오월드 뉴스&공지 게시판. 게시판 글은 fn_move_article() 자바스크립트로 열려서
+# 글마다 따로 걸 주소가 없다. 그래서 공지 링크는 전부 이 목록 페이지로 보낸다.
+NOTICE_BOARD_URL = (
+    "https://www.oworld.kr/newkfsweb/kfi/kfs/linkage/"
+    "selectDccoLinkageList.do?mn=KFS_34_01_09_01"
+)
+
+# TODO(기획팀): 축제·행사 공지 더미데이터. 실제로는 위 게시판에서 받아 온다.
+# start/end 가 둘 다 None 이면 기간 제한이 없는 상시 안내로 다룬다.
+# category 는 theme.NOTICE_COLOR 의 키와 맞춘다.
+# url 을 넣지 않으면 NOTICE_BOARD_URL(게시판 목록)로 연결된다.
+NOTICES = [
+    {
+        "id": "summer-night-2026",
+        "category": "축제",
+        "icon": "🎆",
+        "title": "오월드 썸머 나이트 페스티벌",
+        "start": dt.date(2026, 8, 8),
+        "end": dt.date(2026, 8, 23),
+        "place": "주토피아 중앙광장",
+        "time": "18:00 ~ 22:00",
+        "summary": "야간 개장 기간에 워터 퍼레이드와 불꽃쇼가 매일 열려요.",
+    },
+    {
+        "id": "baby-lion",
+        "category": "행사",
+        "icon": "🦁",
+        "title": "아기사자 삼둥이 특별 공개",
+        "start": dt.date(2026, 8, 15),
+        "end": dt.date(2026, 8, 17),
+        "place": "버드랜드 사파리존",
+        "time": "11:00 / 15:00 (1일 2회)",
+        "summary": "광복절 연휴 사흘 동안만 아기사자를 가까이에서 볼 수 있어요.",
+    },
+    {
+        "id": "ride-inspection",
+        "category": "점검",
+        "icon": "🛠️",
+        "title": "회전목마·바이킹 정기 안전점검 운휴",
+        "start": dt.date(2026, 8, 19),
+        "end": dt.date(2026, 8, 20),
+        "place": "플라워랜드 놀이기구존",
+        "time": "종일",
+        "summary": "점검 기간에는 두 기종만 운휴하고 나머지는 정상 운영합니다.",
+    },
+    {
+        "id": "waterpark-close",
+        "category": "안내",
+        "icon": "💧",
+        "title": "워터파크 여름 시즌 운영 종료",
+        "start": dt.date(2026, 8, 31),
+        "end": dt.date(2026, 8, 31),
+        "place": "오월드 워터파크",
+        "time": "18:00 마감",
+        "summary": "8월 31일을 끝으로 워터파크 운영을 마칩니다.",
+    },
+    {
+        "id": "chrysanthemum",
+        "category": "예매",
+        "icon": "🌻",
+        "title": "가을 국화 축제 사전 예매 시작",
+        "start": dt.date(2026, 9, 12),
+        "end": dt.date(2026, 10, 5),
+        "place": "플라워랜드 전역",
+        "time": "09:30 ~ 21:00",
+        "summary": "사전 예매하면 입장권을 30% 싸게 살 수 있어요.",
+    },
+    {
+        "id": "halloween",
+        "category": "축제",
+        "icon": "🎃",
+        "title": "할로윈 나이트 퍼레이드",
+        "start": dt.date(2026, 10, 24),
+        "end": dt.date(2026, 11, 2),
+        "place": "정문 ~ 주토피아 순환로",
+        "time": "19:30 ~ 21:00",
+        "summary": "가면을 쓰고 오면 굿즈를 나눠 드립니다.",
+    },
+    {
+        "id": "opening-hours",
+        "category": "안내",
+        "icon": "🕘",
+        "title": "여름철 운영시간 · 주차 안내",
+        "start": None,
+        "end": None,
+        "place": "정문 주차장 (2,400대)",
+        "time": "09:30 ~ 22:00",
+        "summary": "주말 12시~15시에는 주차장이 가장 붐빕니다.",
+    },
+    {
+        "id": "water-gun-2026",
+        "category": "축제",
+        "icon": "🔫",
+        "title": "한여름 물총 대작전",
+        "start": dt.date(2026, 7, 18),
+        "end": dt.date(2026, 8, 2),
+        "place": "주토피아 중앙광장",
+        "time": "14:00 ~ 17:00",
+        "summary": "성황리에 종료했습니다. 내년에 다시 만나요.",
+    },
+]
+
+# 상태 정렬 우선순위. 진행 중 → 예정 → 상시 순으로 보여 준다.
+_NOTICE_STATE_ORDER = {"ongoing": 0, "upcoming": 1, "always": 2, "ended": 3}
+
 
 # ---------------------------------------------------------------------------
 # 공개 함수
@@ -155,6 +260,65 @@ def crowd_label(congestion) -> str:
         return CONGESTION_LABELS.get(int(congestion), CROWD_LEVEL_UNKNOWN)
     except (TypeError, ValueError):
         return CROWD_LEVEL_UNKNOWN
+
+
+def fetch_notices(today: dt.date | None = None, include_ended: bool = False) -> list[dict]:
+    """공지 목록에 오늘 기준 상태를 붙여 정렬해 반환한다.
+
+    NOTICES 의 원본 키(icon/title/place/time/summary/url 등)에 아래를 더한다.
+
+      state       : str   'ongoing' | 'upcoming' | 'ended' | 'always'
+      state_label : str   '진행 중' | 'D-3' | '종료' | '상시'
+      dday        : int   시작일까지 남은 일수 (진행 중/상시/종료는 0)
+      period_text : str   '08.08 ~ 08.23' / '08.31' / '상시'
+      days_left   : int   종료일까지 남은 일수 (진행 중일 때만 의미 있음)
+    """
+    base = today or dt.date.today()
+    rows = [_notice_row(n, base) for n in NOTICES]
+    if not include_ended:
+        rows = [r for r in rows if r["state"] != "ended"]
+    rows.sort(key=lambda r: (_NOTICE_STATE_ORDER[r["state"]], r["start"] or dt.date.max))
+    return rows
+
+
+def _notice_row(notice: dict, today: dt.date) -> dict:
+    row = dict(notice)
+    row["url"] = row.get("url") or NOTICE_BOARD_URL
+    start, end = row.get("start"), row.get("end")
+
+    if start is None:
+        row |= {
+            "state": "always",
+            "state_label": "상시",
+            "dday": 0,
+            "days_left": 0,
+            "period_text": "상시",
+        }
+        return row
+
+    end = end or start
+    if today > end:
+        state, label, dday = "ended", "종료", 0
+    elif today >= start:
+        state, label, dday = "ongoing", "진행 중", 0
+    else:
+        dday = (start - today).days
+        state, label = "upcoming", f"D-{dday}"
+
+    fmt = "%m.%d"
+    period = (
+        start.strftime(fmt)
+        if start == end
+        else f"{start.strftime(fmt)} ~ {end.strftime(fmt)}"
+    )
+    row |= {
+        "state": state,
+        "state_label": label,
+        "dday": dday,
+        "days_left": max((end - today).days, 0),
+        "period_text": period,
+    }
+    return row
 
 
 # ---------------------------------------------------------------------------

@@ -44,6 +44,10 @@ from theme import (
     HOLIDAY_LABEL_COLOR,
     LEVEL_COLOR,
     LEVEL_COLOR_FALLBACK,
+    NOTICE_COLOR,
+    NOTICE_COLOR_FALLBACK,
+    NOTICE_STATE_COLOR,
+    NOTICE_STATE_COLOR_FALLBACK,
     SATURDAY_LABEL_COLOR,
     humidity_color,
     rain_color,
@@ -747,6 +751,55 @@ def render_trend(*, show_weather: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 4-2. 축제·행사 공지
+# ---------------------------------------------------------------------------
+notices = dp.fetch_notices(today)
+
+
+def notice_color(notice) -> str:
+    return NOTICE_COLOR.get(notice["category"], NOTICE_COLOR_FALLBACK)
+
+
+def render_notices(limit: int = 5) -> None:
+    """공지 목록. 줄 전체가 링크라 어디를 눌러도 공지 원문이 새 탭에서 열린다."""
+    items = notices[:limit]
+    if not items:
+        st.caption("등록된 공지가 없어요.")
+        return
+
+    rows = []
+    for n in items:
+        color = notice_color(n)
+        state_color = NOTICE_STATE_COLOR.get(n["state"], NOTICE_STATE_COLOR_FALLBACK)
+        rows.append(
+            f'<a href="{n["url"]}" target="_blank" rel="noopener noreferrer"'
+            f' style="display:block; text-decoration:none; color:inherit; padding:9px 4px;'
+            f' border-bottom:1px solid rgba(0,0,0,0.06);">'
+            f'<div style="display:flex; align-items:baseline; gap:7px; flex-wrap:wrap;">'
+            f'<span style="color:{color}; font-size:1.05rem;">●</span>'
+            f'<span style="font-size:0.72rem; color:{color}; font-weight:700;">'
+            f'{n["category"]}</span>'
+            f'<span style="font-weight:600; font-size:0.95rem;">{n["title"]}</span>'
+            f'<span style="color:#2F6FD0; font-size:0.82rem; white-space:nowrap;">바로가기 ↗</span>'
+            f"</div>"
+            f'<div style="font-size:0.78rem; color:gray; margin-top:3px; margin-left:20px;">'
+            f'{n["period_text"]}<span style="color:#C9CED6; margin:0 6px;">·</span>'
+            f'<span style="color:{state_color}; font-weight:600;">{n["state_label"]}</span></div>'
+            f"</a>"
+        )
+    rows.append(
+        '<div style="margin-top:10px; font-size:0.85rem;">'
+        f'<a href="{dp.NOTICE_BOARD_URL}" target="_blank" rel="noopener noreferrer"'
+        ' style="color:#2F6FD0; text-decoration:none; font-weight:600;">'
+        "공지사항 전체 보기 →</a></div>"
+    )
+    # 바깥 <div> 로 감싸는 것이 중요하다. 문자열이 <a> 로 시작하면 마크다운이 전체를
+    # 문단(<p>)으로 감싸고, <p> 안에 블록 요소인 <div> 가 오면 브라우저가 <p> 를 강제로
+    # 닫으면서 첫 줄의 flex 레이아웃(gap)이 통째로 날아간다.
+    st.markdown(f'<div>{"".join(rows)}</div>', unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # 5. 사이드바 (2) - 날씨 / 추천 / 화면 설정
 # ---------------------------------------------------------------------------
 with st.sidebar:
@@ -766,6 +819,10 @@ with st.sidebar:
         weather_metric(
             "평균습도", f"{sel['humidity']}%", humidity_color(sel["humidity"])
         )
+
+    st.divider()
+    st.markdown("### 📢 축제 · 행사 공지")
+    render_notices()
 
     # 뉴스 블록 보류: OpenAI 호출부(response 생성)가 아직 없어 키가 있으면 NameError 가 난다.
     # 웹서치 응답 코드를 채운 뒤 아래를 되살리면 된다.
@@ -820,6 +877,7 @@ with st.sidebar:
             st.session_state.ignored_point_index = None
             st.rerun()
 
+    st.divider()
     st.markdown("## 🎡 줄서기 싫어요")
     st.caption("대전 오월드 방문자 수 예측 · 티익스프레스")
 

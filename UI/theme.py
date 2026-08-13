@@ -12,6 +12,26 @@ LEVEL_COLOR_FALLBACK = "#BFC7D1"
 # 추천 1순위 막대 강조색
 BEST_COLOR = "#7BA7D4"
 
+# 공지 카테고리 → 색상. data_provider.NOTICES 의 category 와 짝을 이룬다.
+# 새 카테고리가 들어와도 죽지 않도록 NOTICE_COLOR.get(..., NOTICE_COLOR_FALLBACK) 로 쓴다.
+NOTICE_COLOR = {
+    "축제": "#E7A9A0",
+    "행사": "#7BA7D4",
+    "점검": "#E8C79A",
+    "예매": "#A8CBB0",
+    "안내": "#B0AEC9",
+}
+NOTICE_COLOR_FALLBACK = "#BFC7D1"
+
+# 공지 진행 상태 → 글자색. '진행 중'은 초록, '예정(D-n)'은 파랑으로 구분한다.
+NOTICE_STATE_COLOR = {
+    "ongoing": "#2F7A57",
+    "upcoming": "#2F6FD0",
+    "always": "#6B7280",
+    "ended": "#9AA1AC",
+}
+NOTICE_STATE_COLOR_FALLBACK = "#6B7280"
+
 # 그래프 x축 날짜 레이블 색. 달력처럼 토요일은 파랑, 일요일·공휴일은 빨강.
 DATE_LABEL_COLOR = "#1F2A37"
 SATURDAY_LABEL_COLOR = "#2F6FD0"
