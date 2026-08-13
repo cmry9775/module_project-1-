@@ -317,6 +317,16 @@ def _as_int(value, default: int = 0) -> int:
         return default
 
 
+def _as_score(value, default: int = 0) -> int:
+    """이용자·날씨 Score 를 이 변수의 범위(0~100)로 잘라 반환한다.
+
+    이용자 Score 는 학습에 나온 방문객 구간을 100~1 로 펼친 값이라,
+    예측 인원이 그 구간보다 적거나 많으면 100을 넘거나 0 아래로 내려온다.
+    UI는 받은 값을 고치지 않고 표시만 하되, 범위 밖은 최저·최고로 교정한다.
+    """
+    return int(np.clip(_as_int(value, default), 0, 100))
+
+
 def _meta_value(meta: dict, name: str, default):
     """meta 키는 model_ 접두사를 쓰지만, 초기 협의본은 congestion_ 이었다.
     어느 쪽이 와도 값이 조용히 기본값으로 떨어지지 않게 둘 다 받는다.
@@ -352,8 +362,8 @@ def _to_row(day) -> dict | None:
         "pred_visitors": _as_int(data.get("predicted_visitors")),
         "congestion": _as_int(data.get("congestion"), -1),
         "crowd_level": crowd_label(data.get("congestion")),
-        "visitor_score": _as_int(data.get("user_score")),
-        "weather_score": _as_int(data.get("weather_score")),
+        "visitor_score": _as_score(data.get("user_score")),
+        "weather_score": _as_score(data.get("weather_score")),
         "weather_summary": str(meta.get("weather_summary") or ""),
         "weather_icon": str(meta.get("weather_icon") or ""),
         "weather_source": str(meta.get("weather_source") or ""),
