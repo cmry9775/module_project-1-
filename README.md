@@ -40,12 +40,24 @@
 * 샌드위치 데이 데이터가 **총 11개**로 적게 도출
 * 표본 수가 적어 통계적 유의성을 확보하기에는 다소 한계
 
+## 3. `test6.ipynb` 특성 융합 내용
+평일/휴일 특성 융합 완료 ('holiday_type' 생성)
 
-## 3. 주요 파일
+
+## 3. 파일 정리 
+### 주요파일
 - Oworld.csv - 최종피처 파일
-- Owrold_hold.csv - 보류 피처 파일
-- Owrold_final_processed - Oworld.csv를 바탕으로 데이터 처리 및 정규화(Normalization)를 거쳐 새로 생성된 가공 파일
-- Owrold_final_processed_cleaned.csv - 특성 융합된 것 데이터 바탕으로 데이터 처리 및 정규화를 거쳐 새로 생성된 가공 파일
+- Oworld_hold.csv - 보류 피처 파일
+- Oworld_final_processed - Oworld.csv를 바탕으로 데이터 처리 및 정규화(Normalization)를 거쳐 새로 생성된 가공 파일
+- Oworld_final_processed_cleaned.csv - 특성 융합된 것 데이터 바탕으로 데이터 처리 및 정규화를 거쳐 새로 생성된 가공 파일
+- Oworld_final_for_model.csv - test7.ipynb 코드에서 파생된 파일, 시각화용 임시 칼럼 (is_rain) 제거한 후 데이터셋 저장
+
 - test4.ipynb - Owrold.csv 파일을 바탕으로 진행된 데이터 분석 및 전처리 
 - test5.ipynb - 샌드위치 데이 파악 및 이에 따른 데이터 분석 파일 
 - test6.ipynb - 특성 융합된 데이터를 파탕으로 진행된 데이터 분석 및 전처리 
+- test7.ipynb - Oworld_temp.csv 파일을 바탕으로 특성 융합된 데이터 등을 고려하여 진행된 데이터 분석 및 전처리
+
+### 이외의 파일
+- festival_data.json : 대전문화축제 오픈API를 호출해서 저장한 json 파일 -> 기간 내 데이터 수 부족으로 사용 X
+- daejeon_event_schedule.json : 대전광역시 사이트에서 기간 내 월별 축제 및 행사를 웹크롤링 (fetch_data2.ipynb)하여 저장한 파일 -> 오월드 입장객과의 연관성 부족 (fetch_data2.ipynb)으로 사용 X
+- test1~3 까지는 이상치 처리 전의 Oworld.csv 파일 사용으로 중요하지 않음.
