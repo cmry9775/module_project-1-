@@ -1,0 +1,19 @@
+# 실행: pip install -r requirements.txt  →  streamlit run app.py
+
+# --- UI 화면 ---
+# 1.61 이상: 사이드바 초기 폭을 정수로 주는 initial_sidebar_state 를 쓴다.
+streamlit>=1.61
+plotly>=5.18
+pandas>=2.0
+numpy>=1.24
+folium>=0.16
+streamlit-folium>=0.20
+
+# --- 예측 파이프라인 (data_provider.USE_MOCK = False 일 때 필요) ---
+# 각 팀 모듈이 요구하는 패키지. 버전 하한은 확인 후 조정한다.
+catboost>=1.2          # ml_service - 방문객 회귀 / 혼잡도 분류 모델
+holidays>=0.50         # oworld_openai_pipeline - 공휴일 판정
+requests>=2.31         # weather - Open-Meteo 예보 조회
+beautifulsoup4>=4.12   # notice - 공지 게시판 크롤링
+openai>=1.40           # notice - 공지 요약
+python-dotenv>=1.0     # OPENAI_API_KEY 등 .env 로딩
