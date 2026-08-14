@@ -1,0 +1,16 @@
+# python -m pip install -r requirements.txt
+
+streamlit>=1.49
+plotly>=5.18
+pandas>=2.0
+numpy>=1.24
+folium>=0.16
+streamlit-folium>=0.20
+# 뉴스 블록 보류 중이라 함께 주석 처리 => 공지 웹서핑
+openai>=1.40
+
+requests  # 날씨 API / 오월드 공지 페이지
+holidays  # 휴일 Feature 계산
+catboost  # 주요 예측 모델
+python-dotenv # .env => API 키
+beautifulsoup4 # 공지 추출
