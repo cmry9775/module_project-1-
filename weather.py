@@ -2,14 +2,14 @@ import requests
 
 def get_forecast_weather(target_date):
     """
-    대전 오월드 위치를 기준으로 특정 날짜의 '낮 12시' 날씨를 반환합니다.
-    (최대 14일 이내 조회 가능)
+    [위치 기반 14일 기상 데이터 수집]
+    Open-Meteo API를 활용하여, 대전 오월드 좌표를 기준으로 14일간의 시간별 예보 데이터를 실시간 수집
     """
-    # 대전 오월드 위도/경도
+    # 대전 오월드 위도와 경도
     lat = 36.2875
     lon = 127.3985
     
-    # 💡 조회 일자 14일 (forecast_days=14)
+    # 조회 일자 14일 (forecast_days=14)
     url = (
         # https://open-meteo.com/ 참초
         f"https://api.open-meteo.com/v1/forecast?"
@@ -40,15 +40,19 @@ def get_forecast_weather(target_date):
                 return "뇌우", "🌩️"
             return "알 수 없음", "🌡️"
 
+        # 전체 시간별 데이터 중 타겟 날짜 추출
         times = data["hourly"]["time"]
+
+        # 방문객이 가장 활동하기 좋은 '낮 12시(T12:00)'를 기준 데이터로 타겟팅하여 인덱싱
         target_time_str = f"{target_date}T12:00"
         
         if target_time_str in times:
             idx = times.index(target_time_str)
             
-            # 한글 설명과 아이콘 추출
+            # 인덱스를 기반으로 해당 시간의 날씨 코드와 온도, 습도, 강수확률 파싱
             weather_desc, weather_icon = get_weather_info(data["hourly"]["weather_code"][idx])
-            
+
+            # Dictionary로 구조화하여 반환
             return {
                 "weather": weather_desc,
                 "icon": weather_icon,
@@ -57,6 +61,7 @@ def get_forecast_weather(target_date):
                 "pop": data["hourly"]["precipitation_probability"][idx]
             }
         else:
+            # 타겟 날짜가 14일 범위를 벗어난 경우의 예외 처리
             return {"weather": "데이터 없음", "icon": "❓", "temperature": "-", "humidity": "-", "rain": "-"}
 
     except Exception as e:

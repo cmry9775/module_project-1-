@@ -18,12 +18,23 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 def clean_and_truncate_text(text, max_len=250):
+    """
+    [데이터 전처리 및 토큰 최적화 함수]
+    크롤링된 HTML 원문 텍스트의 불필요한 공백과 줄바꿈을 압축하고, 
+    정해진 길이(max_len)만큼만 잘라내어 OpenAI 입력 토큰 비용을 최소화
+    """
     if not text: return ""
+    # \s+ 정규식을 이용해 탭, 연속된 띄어쓰기, 줄바꿈을 단일 공백으로 치환
     cleaned = re.sub(r'\s+', ' ', text).strip()
     return cleaned[:max_len]
 
-# 2. 크롤링 함수 - 공지사항 10개
+# 2. 크롤링 함수
 def get_oworld_notices(target_url):
+    """
+    [오월드 공지사항 웹 크롤러]
+    최신 공지사항 목록에서 제목과 상세 URL을 추출하고, 
+    해당 URL로 다시 접근하여 본문 텍스트를 파싱하여 반환
+    """
     headers = {"User-Agent": "Mozilla/5.0"}
     results = []
     
@@ -35,12 +46,14 @@ def get_oworld_notices(target_url):
         # 'faqTbl' 클래스를 가진 테이블의 내용물(tr)만 확인
         notice_list = soup.select("table.faqTbl tbody tr")
 
+        # 비용 절감 및 데이터 효율을 위해 최신 공지 7개만 수
         for row in notice_list[:7]:
             title_tag = row.select_one("td.title a")
             if title_tag:
                 clean_title = title_tag.get_text(strip=True)
                 # 게시판 본문 내용 파싱
                 href = title_tag['href']
+                # Javascript 함수 내부에 숨겨진 게시글 ID(bbsIdx) 정규식 추출
                 match = re.search(r"fn_move_article\('(\d+)'\)", href)
                 
                 content_text = ""
@@ -48,6 +61,7 @@ def get_oworld_notices(target_url):
                 
                 if match:
                     article_id = match.group(1)
+                    # 실제 게시글 상세 페이지 URL 조합
                     detail_url = f"https://www.oworld.kr/newkfsweb/kfi/kfs/linkage/selectDccoLinkage.do?bbsIdx={article_id}&mn=KFS_34_01_09_01&bbscd=9&menucd=916"
                     
                     detail_response = requests.get(detail_url, headers=headers)
@@ -55,6 +69,7 @@ def get_oworld_notices(target_url):
                     
                     td_list = detail_soup.find_all("td")
                     if td_list:
+                        # 텍스트가 가장 많은 <td> 영역을 본문으로 간주하여 추출
                         content_area = max(td_list, key=lambda td: len(td.get_text(strip=True)))
                         content_text = content_area.get_text(separator=" ", strip=True)
 
@@ -70,7 +85,13 @@ def get_oworld_notices(target_url):
 
 # 3. AI 분석 함수 (URL 직접 주입 방식 적용)
 def get_urgent_notice_json(notices):
+    """
+    [AI 기반 공지사항 구조화 에이전트]
+    수집된 텍스트를 바탕으로 UI 시안에 맞춘 표준 JSON 데이터를 생성
+    URL 임의 생(환각) 방지를 위해 원본 데이터를 프롬프트에 직접 주입
+    """
     if not notices:
+        # 시스템 에러 방지를 위한 빈 데이터 Fallback(기본값) 반환
         return json.dumps({
             "status": "error", 
             "notices_list": [], 
@@ -79,12 +100,14 @@ def get_urgent_notice_json(notices):
     
     today_str = datetime.now().strftime("%Y-%m-%d")
     
-    # AI에게 텍스트를 줄 때 [제목, 본문, 진짜 URL]을 한 세트로 묶어서 전달
+    # [환각(Hallucination) 차단] 
+    # AI가 링크를 지어내지 못하도록 [제목, 본문, 원본 URL]을 하나의 세트로 묶어서 주입
     formatted_text = "[최신 공지사항 7개 데이터]\n"
     for i, item in enumerate(notices, 1):
         clean_text = clean_and_truncate_text(item.get("text", ""))
         formatted_text += f"[공지 {i}]\n- 원본 제목: {item['title']}\n- 본문 요약: {clean_text}\n- URL: {item['url']}\n\n"
 
+    # 프롬프트를 '전체 규칙'과 '세부 항목 규칙'으로 분리하여 JSON 스키마 붕괴 방지
     user_prompt = f"""{formatted_text}
         [중요 지시사항]
         오늘 날짜는 {today_str}입니다. 
@@ -104,7 +127,7 @@ def get_urgent_notice_json(notices):
 
         [출력 JSON 포맷 예시]
         {{
-        "   tatus": "success",
+        "status": "success",
         "major_summary": "8월 15일부터 여름축제와 야간개장이 시작되어 다가오는 주말 방문객이 집중될 것으로 예상되며, 펀하우스 등 일부 시설은 당분간 운휴합니다.",
         "notices_list": [
             {{
@@ -131,10 +154,10 @@ def get_urgent_notice_json(notices):
             ]
         )
 
-        # 토큰 사용량 확인
+        # 유지보수 및 비용 모니터링을 위한 토큰 사용량 확인
         print(f"[토큰 사용량] 입력: {response.usage.prompt_tokens} | 출력: {response.usage.completion_tokens} | 총합: {response.usage.total_tokens}")
 
-        # 파이썬에서 복잡하게 매핑할 필요 없이, AI가 만든 완벽한 JSON을 그대로 반환합니다!
+        # AI가 만든 JSON을 그대로 반환
         return response.choices[0].message.content
         
     except Exception as e:
