@@ -1,15 +1,6 @@
-"""오월드 10일 예측 데이터 파이프라인.
-
-역할
-- weather.py에서 날짜별 실제 날씨를 받음
-- 방문객 회귀 모델용 11개 Feature를 생성
-- 혼잡도 분류 모델용 17개 Feature를 별도로 생성
-- ml_service.py에 두 입력을 전달
-- Streamlit UI가 사용할 날짜별 결과를 반환
-"""
-
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from typing import Any, Callable
 from zoneinfo import ZoneInfo
@@ -19,27 +10,20 @@ import pandas as pd
 
 from weather import get_forecast_weather_range
 
-PIPELINE_VERSION = "9.0-dual-model-input"
+PIPELINE_VERSION = "14.0-direct-notice-functions"
 SEOUL = ZoneInfo("Asia/Seoul")
 WEATHER_SOURCE = "Open-Meteo / 대전 오월드 좌표 / 낮 12시 예보"
+NOTICE_SOURCE = (
+    "https://www.oworld.kr/newkfsweb/kfi/kfs/linkage/"
+    "selectDccoLinkageList.do?mn=KFS_34_01_09_01&bbscd=9&menucd=916"
+)
+EVENT_BOARD_URL = (
+    "https://www.oworld.kr/newkfsweb/kfi/kfs/event/"
+    "selectDccoEventList.do?mn=KFS_34_02_03_01"
+)
 
-# 방문객 수 회귀 모델의 실제 Feature 11개
-VISITOR_FEATURES = [
-    "holiday",
-    "mon",
-    "tue",
-    "wed",
-    "thur",
-    "fri",
-    "sat",
-    "sun",
-    "temperature",
-    "rain",
-    "humidity",
-]
-
-# 혼잡도 분류 모델의 실제 Feature 17개
-CONGESTION_FEATURES = [
+# 학습모델 Feature 17개
+MODEL_FEATURES = [
     "dayoff",
     "nextdayoff",
     "jan",
@@ -59,7 +43,6 @@ CONGESTION_FEATURES = [
     "humidity",
 ]
 
-WEEKDAYS = ["mon", "tue", "wed", "thur", "fri", "sat", "sun"]
 MONTHS = [
     "jan",
     "feb",
@@ -75,39 +58,23 @@ MONTHS = [
     "dec",
 ]
 
+# UI 표시용 요일 값 생성
+WEEKDAYS = ["mon", "tue", "wed", "thur", "fri", "sat", "sun"]
 
 def _holiday_calendar(*dates: date):
-    """입력 날짜들에 필요한 연도의 대한민국 공휴일 달력을 만듭니다."""
     years = sorted({value.year for value in dates})
     return holidays.KR(years=years)
 
 
+def _is_public_holiday(target: date) -> bool:
+    return target in _holiday_calendar(target)
+
+
 def _is_dayoff(target: date) -> bool:
-    """주말 또는 대한민국 법정공휴일이면 True를 반환합니다.
-
-    현재 혼잡도 모델 Feature 이름을 기준으로 dayoff를 이렇게 해석했습니다.
-    ML 학습 코드의 dayoff 정의가 다르면 이 함수만 같은 기준으로 수정해야 합니다.
-    """
-    calendar = _holiday_calendar(target)
-    return target.weekday() >= 5 or target in calendar
+    return target.weekday() >= 5 or _is_public_holiday(target)
 
 
-def make_visitor_date_features(target_date: str) -> dict[str, int]:
-    """방문객 회귀 모델용 공휴일·요일 One-Hot Feature를 만듭니다."""
-    target = date.fromisoformat(target_date)
-    calendar = _holiday_calendar(target)
-
-    result = {"holiday": int(target in calendar)}
-    weekday_index = target.weekday()
-
-    for index, name in enumerate(WEEKDAYS):
-        result[name] = int(index == weekday_index)
-
-    return result
-
-
-def make_congestion_date_features(target_date: str) -> dict[str, int]:
-    """혼잡도 분류 모델용 휴일·다음날 휴일·월 One-Hot을 만듭니다."""
+def make_model_date_features(target_date: str) -> dict[str, int]:
     target = date.fromisoformat(target_date)
     next_date = target + timedelta(days=1)
 
@@ -121,14 +88,22 @@ def make_congestion_date_features(target_date: str) -> dict[str, int]:
 
     return result
 
+#UI 표시용 공휴일·주말·요일 One-Hot
+def make_ui_date_info(target_date: str) -> dict[str, Any]:
+    target = date.fromisoformat(target_date)
+    weekday_index = target.weekday()
 
-def is_weekend(target_date: str) -> bool:
-    """UI 표시용 주말 여부입니다."""
-    return date.fromisoformat(target_date).weekday() >= 5
+    return {
+        "holiday": _is_public_holiday(target),
+        "weekend": weekday_index >= 5,
+        "weekday": {
+            name: index == weekday_index
+            for index, name in enumerate(WEEKDAYS)
+        },
+    }
 
-
+#학습모델이 사용하는 날씨값을 검증하고 숫자로 변환
 def _validate_weather(weather: dict[str, Any]) -> dict[str, float]:
-    """두 모델이 공통으로 쓰는 날씨값을 검증하고 숫자로 변환합니다."""
     required = ["temperature", "rain", "humidity"]
     missing = [name for name in required if weather.get(name) is None]
 
@@ -147,56 +122,33 @@ def _validate_weather(weather: dict[str, Any]) -> dict[str, float]:
         raise ValueError(f"습도 범위가 잘못되었습니다: {humidity}")
 
     return {
-        "temperature": temperature,
-        "rain": rain,
-        "humidity": humidity,
+        "temperature": round(temperature, 1),
+        "rain": round(rain, 1),
+        "humidity": round(humidity, 1),
     }
 
-
-def make_visitor_model_input(
-    target_date: str,
-    weather: dict[str, Any],
-) -> pd.DataFrame:
-    """방문객 회귀 모델용 11개 Feature DataFrame을 만듭니다."""
-    weather_values = _validate_weather(weather)
-    row = make_visitor_date_features(target_date)
-    row.update(weather_values)
-    return pd.DataFrame([row], columns=VISITOR_FEATURES).astype(float)
-
-
-def make_congestion_model_input(
-    target_date: str,
-    weather: dict[str, Any],
-) -> pd.DataFrame:
-    """혼잡도 분류 모델용 17개 Feature DataFrame을 만듭니다."""
-    weather_values = _validate_weather(weather)
-    row = make_congestion_date_features(target_date)
-    row.update(weather_values)
-    return pd.DataFrame([row], columns=CONGESTION_FEATURES).astype(float)
-
-
+# 학습모델용 input 생성
 def make_model_input(
     target_date: str,
     weather: dict[str, Any],
 ) -> pd.DataFrame:
-    """이전 코드와의 호환용: 방문객 모델 입력만 반환합니다."""
-    return make_visitor_model_input(target_date, weather)
+    row = make_model_date_features(target_date)
+    row.update(_validate_weather(weather))
+    return pd.DataFrame([row], columns=MODEL_FEATURES).astype(float)
 
-
+#학습모델에서 방문객·혼잡도·두 점수를 받아 형식 검증
 def call_ml(
-    visitor_input: pd.DataFrame,
-    congestion_input: pd.DataFrame,
-    predictor: Callable[[pd.DataFrame, pd.DataFrame], dict[str, Any]] | None = None,
+    model_input: pd.DataFrame,
+    predictor: Callable[[pd.DataFrame], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """ML 서비스에서 방문객·혼잡도·두 점수를 받아 검증합니다."""
     if predictor is None:
         try:
-            from ml_service import predict_all
+            from ml_service import predict_all_with_custom_tool
         except ImportError as exc:
             raise RuntimeError("ml_service.py를 같은 폴더에 두세요.") from exc
-        predictor = predict_all
+        predictor = predict_all_with_custom_tool
 
-    result = predictor(visitor_input.copy(), congestion_input.copy())
+    result = predictor(model_input.copy())
 
     required = [
         "predicted_visitors",
@@ -223,12 +175,74 @@ def call_ml(
         "weather_score": round(float(result["weather_score"])),
     }
 
+#공지 모듈 에러처리 UI payload 유지
+def _notice_error(message: str) -> dict[str, Any]:
+    return {
+        "status": "error",
+        "major_summary": message,
+        "notices_list": [],
+        "event_board_url": EVENT_BOARD_URL,
+    }
 
+# 공지 함수 호출
+def call_notice(
+    notice_provider: Callable[[], dict[str, Any] | str] | None = None,
+) -> dict[str, Any]:
+    try:
+        if notice_provider is None:
+            try:
+                from notice import get_oworld_notices, get_urgent_notice_json
+            except ImportError as exc:
+                return _notice_error(
+                    "notice.py의 get_oworld_notices 또는 "
+                    f"get_urgent_notice_json을 불러오지 못했습니다: {exc}"
+                )
+
+            notices = get_oworld_notices(NOTICE_SOURCE)
+            raw_result = get_urgent_notice_json(notices)
+        else:
+            # 테스트에서는 공지 전체 결과를 반환하는 함수를 주입할 수 있습니다.
+            raw_result = notice_provider()
+
+        if isinstance(raw_result, str):
+            result = json.loads(raw_result)
+        elif isinstance(raw_result, dict):
+            result = raw_result
+        else:
+            raise TypeError("공지 분석 결과는 dict 또는 JSON 문자열이어야 합니다.")
+
+        notices_list = result.get("notices_list")
+        if notices_list is None:
+            # 이전 형식의 notice.py도 최소한 호환합니다.
+            notices_list = result.get("notices", [])
+
+        if not isinstance(notices_list, list):
+            raise TypeError("notices_list는 list여야 합니다.")
+
+        major_summary = (
+            result.get("major_summary")
+            or result.get("summary")
+            or "현재 공지사항 요약을 불러오지 못했습니다."
+        )
+
+        return {
+            "status": str(result.get("status", "error")),
+            "major_summary": str(major_summary),
+            "notices_list": notices_list[:5],
+            "event_board_url": str(
+                result.get("event_board_url") or EVENT_BOARD_URL
+            ),
+        }
+    except json.JSONDecodeError as exc:
+        return _notice_error(f"공지 AI 결과가 올바른 JSON이 아닙니다: {exc}")
+    except Exception as exc:
+        return _notice_error(f"공지사항 처리 실패: {exc}")
+
+#날짜 한 개의 UI용 결과
 def make_day_output(
     weather: dict[str, Any],
-    predictor: Callable[[pd.DataFrame, pd.DataFrame], dict[str, Any]] | None = None,
+    predictor: Callable[[pd.DataFrame], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """날짜 한 개의 UI용 결과를 만듭니다."""
     target_date = weather.get("target_date")
 
     if not target_date:
@@ -247,41 +261,37 @@ def make_day_output(
             "data": None,
         }
 
+    model_input: pd.DataFrame | None = None
+
     try:
-        visitor_input = make_visitor_model_input(target_date, weather)
-        congestion_input = make_congestion_model_input(target_date, weather)
-        prediction = call_ml(visitor_input, congestion_input, predictor)
+        model_input = make_model_input(target_date, weather)
+        prediction = call_ml(model_input, predictor)
     except Exception as exc:
         return {
             "date": target_date,
             "status": "model_error",
             "message": str(exc),
-            "visitor_model_input": (
-                visitor_input.iloc[0].to_dict()
-                if "visitor_input" in locals()
-                else None
-            ),
-            "congestion_model_input": (
-                congestion_input.iloc[0].to_dict()
-                if "congestion_input" in locals()
+            "model_input": (
+                model_input.iloc[0].to_dict()
+                if model_input is not None
                 else None
             ),
             "data": None,
         }
 
-    visitor_row = visitor_input.iloc[0]
-    congestion_row = congestion_input.iloc[0]
+    ui_date = make_ui_date_info(target_date)
+    model_row = model_input.iloc[0]
 
     return {
         "date": target_date,
         "status": "success",
         "data": {
-            "holiday": bool(visitor_row["holiday"]),
-            "weekend": is_weekend(target_date),
-            "weekday": {name: bool(visitor_row[name]) for name in WEEKDAYS},
-            "temperature": float(visitor_row["temperature"]),
-            "rain": float(visitor_row["rain"]),
-            "humidity": float(visitor_row["humidity"]),
+            "holiday": ui_date["holiday"],
+            "weekend": ui_date["weekend"],
+            "weekday": ui_date["weekday"],
+            "temperature": float(model_row["temperature"]),
+            "rain": float(model_row["rain"]),
+            "humidity": float(model_row["humidity"]),
             "predicted_visitors": prediction["predicted_visitors"],
             "congestion": prediction["congestion"],
             "user_score": prediction["user_score"],
@@ -292,46 +302,67 @@ def make_day_output(
             "weather_icon": weather.get("icon"),
             "weather_source": weather.get("source", WEATHER_SOURCE),
             "forecast_time": weather.get("forecast_time", "12:00"),
-            "congestion_dayoff": bool(congestion_row["dayoff"]),
-            "congestion_nextdayoff": bool(congestion_row["nextdayoff"]),
-            "congestion_month": target_date[5:7],
+            "model_dayoff": bool(model_row["dayoff"]),
+            "model_nextdayoff": bool(model_row["nextdayoff"]),
+            "model_month": target_date[5:7],
         },
     }
 
 
 def build_ui_payload(
     days: int = 10,
-    predictor: Callable[[pd.DataFrame, pd.DataFrame], dict[str, Any]] | None = None,
+    predictor: Callable[[pd.DataFrame], dict[str, Any]] | None = None,
     weather_provider: Callable[[int], list[dict[str, Any]]] | None = None,
+    notice_provider: Callable[[], dict[str, Any] | str] | None = None,
+    include_notice: bool = True,
 ) -> dict[str, Any]:
-    """UI 팀에 전달할 오늘 포함 최대 10일치 데이터를 만듭니다."""
+    """UI 팀에 전달할 최대 10일치 예측 결과와 공지 결과를 제작합니다.
+
+    notice는 전체 10일 예측에 공통으로 적용되는 정보이므로 날짜별 days가
+    아니라 payload 최상위의 notice 항목으로 한 번만 전달합니다.
+    """
+    if not 1 <= days <= 10:
+        raise ValueError("days는 1~10이어야 합니다.")
+
     provider = weather_provider or get_forecast_weather_range
     weather_days = provider(days)
     results = [make_day_output(item, predictor) for item in weather_days]
 
+    notice_result = (
+        call_notice(notice_provider)
+        if include_notice
+        else {
+            "status": "skipped",
+            "major_summary": "",
+            "notices_list": [],
+            "event_board_url": EVENT_BOARD_URL,
+        }
+    )
+
     return {
         "generated_at": datetime.now(SEOUL).isoformat(timespec="seconds"),
         "weather_source": WEATHER_SOURCE,
-        # 기존 UI 호환을 위해 방문객 모델 Feature 목록은 그대로 둡니다.
-        "feature_columns": VISITOR_FEATURES,
-        "congestion_feature_columns": CONGESTION_FEATURES,
+        "notice_source": NOTICE_SOURCE,
+        "feature_columns": MODEL_FEATURES,
+        "notice": notice_result,
         "days": results,
     }
 
-
+#UI에서 선택한 날짜의 이미 계산된 결과를 반환
 def get_selected_day(
     payload: dict[str, Any],
     selected_date: str,
 ) -> dict[str, Any] | None:
-    """UI에서 선택한 날짜의 이미 계산된 결과를 반환합니다."""
     return next(
-        (item for item in payload.get("days", []) if item.get("date") == selected_date),
+        (
+            item
+            for item in payload.get("days", [])
+            if item.get("date") == selected_date
+        ),
         None,
     )
 
 
 if __name__ == "__main__":
-    import json
-
     print(f"pipeline version: {PIPELINE_VERSION}")
     print(json.dumps(build_ui_payload(10), ensure_ascii=False, indent=2))
