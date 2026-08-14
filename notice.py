@@ -46,7 +46,7 @@ def get_oworld_notices(target_url):
         # 'faqTbl' 클래스를 가진 테이블의 내용물(tr)만 확인
         notice_list = soup.select("table.faqTbl tbody tr")
 
-        # 비용 절감 및 데이터 효율을 위해 최신 공지 7개만 수
+        # 비용 절감 및 데이터 효율을 위해 최신 공지 7개만 수집
         for row in notice_list[:7]:
             title_tag = row.select_one("td.title a")
             if title_tag:
