@@ -88,7 +88,7 @@ def get_urgent_notice_json(notices):
     """
     [AI 기반 공지사항 구조화 에이전트]
     수집된 텍스트를 바탕으로 UI 시안에 맞춘 표준 JSON 데이터를 생성
-    URL 임의 생(환각) 방지를 위해 원본 데이터를 프롬프트에 직접 주입
+    URL 임의 생성(환각) 방지를 위해 원본 데이터를 프롬프트에 직접 주입
     """
     if not notices:
         # 시스템 에러 방지를 위한 빈 데이터 Fallback(기본값) 반환
