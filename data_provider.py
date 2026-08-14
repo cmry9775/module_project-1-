@@ -1,7 +1,9 @@
 """
 data_provider.py - 다른 팀에서 넘어오는 데이터의 수신 창구
 
-UI는 이 파일의 fetch_bundle() 하나만 호출한다.
+UI는 이 파일의 fetch_forecast() 와 fetch_notice() 를 호출한다.
+공지는 크롤링과 AI 요약이라 예측보다 오래 걸려서, 예측 화면을 먼저 띄우려고
+둘을 나눠 두었다. 한 번에 받고 싶으면 fetch_bundle() 을 쓴다.
 실제 연동 시 USE_MOCK = False 로 바꾸면 되고, app.py 는 손대지 않는다.
 
 ────────────────────────────────────────────────────────────
@@ -182,15 +184,36 @@ def fetch_bundle(start_date: dt.date, n_days: int = 10) -> dict:
 
 
 def fetch_forecast(start_date: dt.date, n_days: int = 10) -> list[dict]:
-    """예측만 필요할 때 쓰는 단축 호출."""
-    return fetch_bundle(start_date, n_days)["rows"]
+    """예측만 받는다. 공지 크롤링과 AI 요약을 건너뛰므로 fetch_bundle 보다 빠르다."""
+    payload = (
+        _mock_payload(start_date, n_days)
+        if USE_MOCK
+        else _real_payload(start_date, n_days, include_notice=False)
+    )
+    return normalize_payload(payload)
 
 
-def _real_payload(start_date: dt.date, n_days: int) -> dict:
+def fetch_notice(start_date: dt.date) -> dict:
+    """공지만 받는다. 예측보다 오래 걸리므로 UI 는 예측을 먼저 그린 뒤 호출한다."""
+    if USE_MOCK:
+        return normalize_notice({"notice": _mock_notice(start_date)})
+
+    try:
+        from oworld_openai_pipeline import call_notice
+
+        return normalize_notice({"notice": call_notice()})
+    except Exception:
+        # 공지는 부가 정보라, 실패해도 예측 화면은 그대로 보여 준다.
+        return normalize_notice({})
+
+
+def _real_payload(
+    start_date: dt.date, n_days: int, include_notice: bool = True
+) -> dict:
     """API팀 파이프라인 호출. 반환 형식은 파일 상단 [ API팀 payload ] 참고."""
     from oworld_openai_pipeline import build_ui_payload
 
-    return build_ui_payload(days=n_days)
+    return build_ui_payload(days=n_days, include_notice=include_notice)
 
 
 def normalize_payload(payload) -> list[dict]:

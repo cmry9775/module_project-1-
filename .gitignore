@@ -16,6 +16,9 @@ env/
 *.joblib
 *.h5
 
+# Streamlit 디스크 캐시 (@st.cache_data(persist="disk"))
+.streamlit/cache/
+
 # OS / IDE
 .DS_Store
 .idea/
@@ -23,3 +26,6 @@ env/
 
 # 내부 공유용 문서
 INTEGRATION_REPORT.md
+
+# 버그 재현용 스크래치 (막대 클릭 선택 이슈 검증)
+.scratch_repro/

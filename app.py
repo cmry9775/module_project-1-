@@ -4,7 +4,8 @@
 
 [역할 경계]
 - 다른 팀에서 받는 값: 기상 정보, 예측 이용자 수, 예측 혼잡도, 이용자 Score, 날씨 Score
-  → UI는 계산하지 않고 그대로 표시한다. (수신 창구: data_provider.fetch_bundle)
+  → UI는 계산하지 않고 그대로 표시한다.
+    (수신 창구: data_provider.fetch_forecast / fetch_notice)
 - UI가 계산하는 값: 최종 추천 점수, 최종 추천 날짜
   → 이용자 Score + 날씨 Score + 사용자 선호도(슬라이더) 세 변수로 산출한다.
 
@@ -83,7 +84,7 @@ SHOW_SCORES = False
 # ---------------------------------------------------------------------------
 # 1. 데이터 수신 (캐시 필수)
 # ---------------------------------------------------------------------------
-# st.cache_data 는 load_bundle 본문만 해시하므로 data_provider.py 를 고쳐도
+# st.cache_data 는 로더 본문만 해시하므로 data_provider.py 를 고쳐도
 # 캐시가 그대로 남는다. 수신 스키마가 바뀌면 예전 결과에 없는 컬럼을 읽다가
 # KeyError 로 죽으므로, 파일 지문을 캐시 키에 넣어 자동으로 무효화한다.
 PROVIDER_FINGERPRINT = hashlib.md5(
@@ -91,29 +92,89 @@ PROVIDER_FINGERPRINT = hashlib.md5(
 ).hexdigest()
 
 
-@st.cache_data(ttl=60 * 60, show_spinner="예측 데이터를 불러오는 중이에요...")
-def load_bundle(start_date: dt.date, n_days: int, fingerprint: str) -> dict:
+# 첫 로딩은 기상 조회와 모델 추론이 함께 돌아 몇 초 걸린다. 캐시 기본 스피너는
+# 화면 왼쪽 위에 작게 떠서 멈춘 화면처럼 보이므로, 화면을 덮는 로딩 화면을 쓴다.
+LOADING_SPLASH_HTML = f"""
+<style>
+{FONT_FACE_CSS}
+@keyframes zw-spin {{ to {{ transform: rotate(360deg); }} }}
+@keyframes zw-pulse {{ 0%, 100% {{ opacity: 0.45; }} 50% {{ opacity: 1; }} }}
+.zw-splash {{
+    position: fixed; inset: 0; z-index: 9999;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 20px;
+    background: rgba(250, 251, 253, 0.94);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    font-family: 'Pretendard', sans-serif;
+}}
+.zw-splash-ring {{
+    width: 66px; height: 66px; border-radius: 50%;
+    border: 5px solid rgba(123, 167, 212, 0.22);
+    border-top-color: {BEST_COLOR};
+    animation: zw-spin 0.9s linear infinite;
+}}
+.zw-splash-title {{ font-size: 1.2rem; font-weight: 700; color: #1F2A37; }}
+.zw-splash-sub {{
+    font-size: 0.9rem; color: #6B7684;
+    animation: zw-pulse 1.6s ease-in-out infinite;
+}}
+</style>
+<div class="zw-splash">
+    <div class="zw-splash-ring"></div>
+    <div class="zw-splash-title">🎡 예측 데이터를 불러오는 중이에요</div>
+    <div class="zw-splash-sub">기상 정보를 모아 10일간 방문자 수를 계산하고 있어요</div>
+</div>
+"""
+
+
+def cache_slot(hours: int) -> str:
+    """hours 시간마다 값이 바뀌는 문자열. 캐시 신선도를 키로 만든다.
+
+    persist="disk" 는 ttl 을 무시하므로 ttl 로는 갱신 주기를 잡을 수 없다.
+    대신 이 값을 인자로 넘겨, 시간대가 바뀌면 새 키가 되어 그때 한 번만
+    다시 받게 한다.
+    """
+    now = dt.datetime.now(SEOUL)
+    return f"{now:%Y-%m-%d}-{now.hour // hours}"
+
+
+# persist="disk" 를 쓰는 이유: 기본 캐시는 메모리에만 있어서 앱을 재시작할 때마다
+# 기상 조회와 OpenAI 호출이 처음부터 다시 돈다. 디스크에 두면 재시작해도 남는다.
+@st.cache_data(persist="disk", max_entries=48, show_spinner=False)
+def load_forecast(
+    start_date: dt.date, n_days: int, slot: str, fingerprint: str
+) -> pd.DataFrame:
     """
     슬라이더를 움직일 때마다 스크립트 전체가 재실행되므로 반드시 캐시를 건다.
-    캐시가 없으면 선호도 조작 1회당 기상 조회와 공지 요약이 다시 호출된다.
+    캐시가 없으면 선호도 조작 1회당 기상 조회가 다시 호출된다.
 
-    예측과 공지를 한 번에 받아 캐시한다. 둘을 따로 불러오면 같은 payload 를
-    두 번 만들게 된다.
-
-    fingerprint 는 캐시 키 용도로만 받는다. 함수 안에서는 쓰지 않는다.
+    slot 과 fingerprint 는 캐시 키 용도로만 받는다. 함수 안에서는 쓰지 않는다.
     """
-    bundle = dp.fetch_bundle(start_date, n_days)
-    return {
-        # 수신 건수가 0이거나 일부 키가 빠져도 컬럼 구성은 항상 같게 만든다.
-        "df": pd.DataFrame(bundle["rows"], columns=dp.ROW_COLUMNS),
-        "notice": bundle["notice"],
-    }
+    # 수신 건수가 0이거나 일부 키가 빠져도 컬럼 구성은 항상 같게 만든다.
+    return pd.DataFrame(dp.fetch_forecast(start_date, n_days), columns=dp.ROW_COLUMNS)
+
+
+@st.cache_data(persist="disk", max_entries=16, show_spinner=False)
+def load_notice(start_date: dt.date, slot: str, fingerprint: str) -> dict:
+    """공지는 예측과 따로 받는다.
+
+    공지는 게시판 크롤링과 AI 요약을 거쳐 예측보다 훨씬 오래 걸린다. 한 번에
+    받으면 공지가 끝날 때까지 그래프와 추천이 화면에 나오지 않으므로, 예측만
+    먼저 받아 메인을 그린 뒤 스크립트 맨 끝에서 이 함수를 호출한다.
+
+    OpenAI 호출이라 예측보다 비싸고 공지는 자주 바뀌지 않으므로, 갱신 주기를
+    예측(1시간)보다 길게 잡는다.
+    """
+    return dp.fetch_notice(start_date)
 
 
 today = dt.datetime.now(SEOUL).date()
-bundle = load_bundle(today, N_DAYS, PROVIDER_FINGERPRINT)
-df = bundle["df"]
-notice = bundle["notice"]
+
+# 캐시가 비어 있을 때만 실제로 기다리게 된다. 캐시가 있으면 곧바로 지워진다.
+splash = st.empty()
+splash.markdown(LOADING_SPLASH_HTML, unsafe_allow_html=True)
+df = load_forecast(today, N_DAYS, cache_slot(1), PROVIDER_FINGERPRINT)
+splash.empty()
 
 if df.empty or not df["ok"].any():
     st.title("대전 오월드 방문자 수 예측")
@@ -685,13 +746,13 @@ def notice_color(item) -> str:
     return NOTICE_COLOR.get(item["category"], NOTICE_COLOR_FALLBACK)
 
 
-def render_notice_summary() -> None:
+def render_notice_summary(notice: dict) -> None:
     """공지 전체를 훑은 한 줄 브리핑. 공지팀이 요약해 준 문장을 그대로 쓴다."""
     if notice["summary"]:
         st.info(notice["summary"], icon="📝")
 
 
-def render_notices(limit: int = 5) -> None:
+def render_notices(notice: dict, limit: int = 5) -> None:
     """공지 목록. 줄 전체가 링크라 어디를 눌러도 공지 원문이 새 탭에서 열린다."""
     items = notice["items"][:limit]
     if not items:
@@ -739,8 +800,8 @@ with st.sidebar:
 
     st.divider()
     st.markdown("### 📢 축제 · 행사 공지")
-    render_notice_summary()
-    render_notices()
+    # 공지는 예측보다 느리다. 자리만 먼저 잡아 두고 메인을 다 그린 뒤 채운다.
+    notice_slot = st.container()
 
     # 뉴스 블록 보류: OpenAI 호출부(response 생성)가 아직 없어 키가 있으면 NameError 가 난다.
     # 웹서치 응답 코드를 채운 뒤 아래를 되살리면 된다.
@@ -847,6 +908,19 @@ st.caption(
 )
 
 render_trend()
+
+
+# ---------------------------------------------------------------------------
+# 7. 공지 (가장 느린 작업이라 맨 마지막)
+# ---------------------------------------------------------------------------
+# 여기까지 오면 그래프와 추천은 이미 화면에 그려져 있다. 공지는 사이드바에
+# 잡아 둔 자리에서 로딩 표시를 띄운 채 받아서 채운다.
+with notice_slot:
+    with st.spinner("공지를 불러오는 중이에요...", show_time=True):
+        notice = load_notice(today, cache_slot(6), PROVIDER_FINGERPRINT)
+    render_notice_summary(notice)
+    render_notices(notice)
+
 
 # --- 푸터 ---
 st.divider()
